@@ -1,0 +1,28 @@
+services:
+  dev:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+
+    init: true
+    command: sleep infinity
+
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+
+    volumes:
+      - type: bind
+        source: ..
+        target: /workspace
+
+      - type: bind
+        source: ../.vscode
+        target: /workspace/.vscode
+
+      - type: volume
+        source: codex-data
+        target: /home/vscode/.codex
+
+volumes:
+  codex-data:

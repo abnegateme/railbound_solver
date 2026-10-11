@@ -1,0 +1,12 @@
+# Runtime dependencies for the next development stage
+numpy
+opencv-python-headless
+pillow
+pydantic
+networkx
+
+# Development tools
+pytest
+pytest-cov
+ruff
+mypy

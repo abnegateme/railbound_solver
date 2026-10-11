@@ -1,0 +1,30 @@
+{
+    "name": "railbound devcontainer",
+    "dockerComposeFile": "docker-compose.yml",
+    "service": "dev",
+    "workspaceFolder": "/workspace",
+    "remoteUser": "vscode",
+    "updateRemoteUserUID": true,
+    "shutdownAction": "stopCompose",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "openai.chatgpt",
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-python.debugpy",
+                "charliermarsh.ruff"
+            ]
+        }
+    },
+    "forwardPorts": [
+        1455
+    ],
+    "portsAttributes": {
+        "1455": {
+            "label": "Codex OAuth",
+            "onAutoForward": "silent",
+            "requireLocalPort": true
+        }
+    }
+}
