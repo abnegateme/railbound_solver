@@ -26,3 +26,4 @@ services:
 
 volumes:
   codex-data:
+    name: codex-data
