@@ -8,7 +8,7 @@
 - The devcontainer uses Ubuntu 24.04, system Python 3.12, `pip`, user `vscode`, and working directory `/workspace`. Docker Compose is only the existing mechanism used by VS Code to start the development container.
 - VS Code is configured to use `/usr/bin/python3`. The `python` alias is absent, so project commands should consistently use `python3` unless an entry-point executable is later installed.
 - The ignored `.venv` is not the configured interpreter and does not have a working `pip`; it should not become part of the project design.
-- Installed and importable runtime libraries are NumPy 2.5.4, OpenCV headless 5.0.0, Pillow 12.3.0, Pydantic 2.14.0, and NetworkX 3.7.
+- Installed and importable runtime libraries are NumPy 2.5.4, OpenCV headless 5.0.0, Pillow 12.3.0, Pydantic 2.14.1, and NetworkX 3.7.
 - Installed development tools are pytest 9.1.1, pytest-cov 7.1.0, Ruff 0.17.0, and mypy 2.4.0.
 - `pyproject.toml` currently contains tool configuration only. It does not yet define package metadata, build configuration, or application entry points.
 - `ruff check .` passes.

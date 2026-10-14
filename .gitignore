@@ -7,3 +7,5 @@ htmlcov/
 .venv/
 *.pyc
 *.egg-info/
+data/*
+!data/.gitkeep
