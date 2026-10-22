@@ -5,15 +5,15 @@
 - Git is clean on `master`, synchronized with `origin/master`.
 - The repository contains nine tracked files: devcontainer and VS Code configuration, `.gitignore`, `AGENTS.md`, and `pyproject.toml`.
 - There is currently no application code, test suite, README, Makefile, or data directory. This matches the intentional cleanup and is not a defect.
-- The devcontainer uses Ubuntu 24.04, system Python 3.12, `pip`, user `vscode`, and working directory `/workspace`. Docker Compose is only the existing mechanism used by VS Code to start the development container.
-- VS Code is configured to use `/usr/bin/python3`. The `python` alias is absent, so project commands should consistently use `python3` unless an entry-point executable is later installed.
+- The devcontainer uses the official Python 3.14 Debian-based image, `pip`, user `vscode`, and working directory `/workspace`. Docker Compose is only the existing mechanism used by VS Code to start the development container.
+- VS Code is configured to use `/usr/local/bin/python3`. Project commands consistently use `python3` unless an entry-point executable is later installed.
 - The ignored `.venv` is not the configured interpreter and does not have a working `pip`; it should not become part of the project design.
-- Installed and importable runtime libraries are NumPy 2.5.4, OpenCV headless 5.0.0, Pillow 12.3.0, Pydantic 2.14.1, and NetworkX 3.7.
+- Dependencies are installed from their current compatible releases during the devcontainer image build.
 - Installed development tools are pytest 9.1.1, pytest-cov 7.1.0, Ruff 0.17.0, and mypy 2.4.0.
 - `pyproject.toml` currently contains tool configuration only. It does not yet define package metadata, build configuration, or application entry points.
 - `ruff check .` passes.
 - `pytest` discovers no tests and exits with code 5. This reflects the intentionally empty application, not a failing test suite.
-- No environment replacement is justified. The current Python, pip, devcontainer, and declared libraries are sufficient for the first several milestones.
+- Use the newest stable Python version supported by all required binary dependencies. Python 3.14 is currently selected because OpenCV publishes wheels through 3.14; upgrade when its 3.15 wheels are available.
 
 ## 2. Architectural principles
 
@@ -49,6 +49,18 @@ Core principles:
 8. **Determinism is mandatory.** Coordinate rounding, candidate ordering, simultaneous movement resolution, solver tie-breaking, and event ordering must be explicitly defined.
 9. **Automation must fail visibly.** Low-confidence grid or object recognition should request manual correction rather than silently producing a plausible but incorrect level.
 10. **Start with observed mechanics.** Do not create a universal Railbound ontology before examining representative levels. Add semantic types as mechanics require them.
+
+### Execution boundary
+
+- The Linux devcontainer is the development environment for editing, linting,
+  type checking, and automated tests.
+- The native GUI and Windows screen capture run in a Windows-host virtual
+  environment. A devcontainer cannot directly access Windows windows.
+- The GUI dependency is an optional package extra installed by the host setup
+  command. The setup command always creates a non-editable runtime installation
+  from the current source, which is checked immediately on the host.
+- A future host GUI may send frames and commands to solver services in the
+  devcontainer, but desktop access must stay on the host side of that boundary.
 
 ## 3. Proposed domain model
 
@@ -204,7 +216,7 @@ M3 and M8 improve automation but do not block manually authored levels, simulati
 
 **Tests:** Import smoke checks, Ruff, and pytest discovery.
 
-**Acceptance criteria:** Python 3.12 and required libraries import successfully; lint runs; the absence of tests is explicitly understood.
+**Acceptance criteria:** Python 3.14 and required libraries import successfully; lint runs; the absence of tests is explicitly understood.
 
 **Risks:** Confusing the ignored `.venv` with the configured system interpreter.
 
@@ -212,19 +224,27 @@ M3 and M8 improve automation but do not block manually authored levels, simulati
 
 **Status:** Verified by the current assessment.
 
-### M1 — Manual calibrated grid vertical slice
+### M1 — Assisted calibrated grid vertical slice
 
 **Goal:** Convert one screenshot plus manual calibration into validated grid geometry, `grid.json`, and `annotated_grid.png`.
 
-**Inputs:** Screenshot, row/column counts, and three ordered cell centers.
+**Inputs:** Screenshot and four ordered cell centers: the origin, its right and
+lower neighbours, and the bottom-right cell. The latter derives the row and
+column counts, which remain editable for correction.
 
-**Deliverables:** Grid geometry model, transforms, JSON serialization, CLI, overlay renderer, and unit tests.
+**Deliverables:** Grid geometry model, transforms, JSON serialization, scripted
+CLI, native calibration window, overlay renderer, and unit tests.
 
-**Proposed interfaces:** `GridGeometry.grid_to_pixel()`, `pixel_to_grid()`, `nearest_cell()`, `load_grid()`, `save_grid()`, and a non-interactive CLI command.
+**Proposed interfaces:** `GridGeometry.grid_to_pixel()`, `pixel_to_grid()`,
+`nearest_cell()`, `load_grid()`, `save_grid()`, a scripted CLI command, and a
+native window reusable by the future solver UI.
 
-**Dependencies:** NumPy, OpenCV, Pydantic, and standard-library JSON/path handling.
+**Dependencies:** NumPy, OpenCV, Pydantic, standard-library JSON/path
+handling, and the host-only `gui` extra containing PySide6.
 
-**Tests:** Synthetic affine grids, round trips, invalid/collinear calibration, bounds behavior, JSON round-trip, and overlay dimensions.
+**Tests:** Synthetic affine grids, four-click dimension derivation and affine
+refinement, additional control-point fitting, round trips, invalid/collinear
+calibration, bounds behavior, JSON round-trip, and overlay dimensions.
 
 **Acceptance criteria:** All expected centers are generated; inverse mapping is accurate within an agreed tolerance; invalid calibration is rejected; output JSON reloads unchanged; the overlay visibly identifies rows, columns, and axes.
 
@@ -477,10 +497,11 @@ The simplest useful strategy is iterative deepening depth-first search over a ca
 
 ## 5. Detailed first vertical slice
 
-The first implementation should be a reproducible, non-interactive command:
+The first implementation should offer a native assisted-calibration window and
+retain a reproducible scripted command:
 
 ```text
-screenshot + manual calibration + dimensions
+screenshot + four center selections
     → validated GridGeometry
     → grid.json
     → annotated_grid.png
@@ -489,14 +510,22 @@ screenshot + manual calibration + dimensions
 ### Inputs
 
 - Image path.
-- `rows` and `cols`.
-- Three ordered cell centers:
+- Four ordered cell centers:
   - `origin`: center of `(0, 0)`
   - `next_col`: center of `(0, 1)`
   - `next_row`: center of `(1, 0)`
-- Explicit output paths.
+  - `last_cell`: center of the bottom-right cell; its grid coordinate derives
+    `rows` and `cols`.
+- Editable row/column controls and a live overlay in the native window. The
+  bottom-right point and further selected labeled cells are retained as
+  control points in a least-squares affine fit.
+- Explicit output paths for scripted operation; a save dialog for interactive
+  operation.
 
-A calibration JSON file is preferable to interactive clicking for the first version because it is reviewable, repeatable, and directly testable. Interactive point selection can be added later without changing the geometry API.
+The native interface is the primary user path because it eliminates external
+pixel-coordinate measurement and row/column counting. The saved calibration
+JSON remains the reviewable, repeatable integration artifact, while the
+scripted command remains available for tests and batch processing.
 
 ### Geometry behavior
 
@@ -644,4 +673,8 @@ The eventual conceptual layout should follow responsibilities such as `geometry`
 
 ## 11. Recommended immediate next task
 
-Implement M1 as one end-to-end manual three-point grid calibration command for a single screenshot, including the affine `GridGeometry`, validated `grid.json`, `annotated_grid.png`, and deterministic geometry/serialization tests.
+Implement M1 as one end-to-end assisted grid calibration flow for a single
+screenshot: a native four-click interface that derives dimensions, plus a
+scripted three-point command for automation. Both produce the affine
+`GridGeometry`, validated `grid.json`, `annotated_grid.png`, and deterministic
+geometry/serialization tests.

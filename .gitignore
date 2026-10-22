@@ -5,7 +5,10 @@ __pycache__/
 .coverage
 htmlcov/
 .venv/
+.venv-gui/
 *.pyc
 *.egg-info/
+build/
 data/*
 !data/.gitkeep
+output/

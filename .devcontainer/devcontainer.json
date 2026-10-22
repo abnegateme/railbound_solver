@@ -6,6 +6,7 @@
     "remoteUser": "vscode",
     "updateRemoteUserUID": true,
     "shutdownAction": "stopCompose",
+    "postCreateCommand": "sudo chown -R $(id -u):$(id -g) /workspace /home/vscode/.codex && sudo chmod -R u+rwX /workspace /home/vscode/.codex",
     "customizations": {
         "vscode": {
             "extensions": [

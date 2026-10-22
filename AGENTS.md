@@ -2,13 +2,15 @@
 
 ## Project
 
-Python 3.12 application.
+Python 3.14 application.
 
 ## Development
 
-Run tests with:
+Run the full test suite from VS Code with **Tasks: Run Test Task** or the
+`Railbound: Run all tests` task.
 
-    pytest
+Agents must not run `pytest` or invoke the VS Code test task. Ask the user to
+run it and report its result instead.
 
 Run linting with:
 
@@ -24,7 +26,7 @@ Run type checking with:
 
 ## Code style
 
-- Use Python 3.12 syntax.
+- Use Python 3.14 syntax.
 - Add type annotations to public functions.
 - Prefer pathlib over os.path.
 - Keep functions small.
@@ -38,4 +40,6 @@ Run type checking with:
 Run:
 
     ruff check .
-    pytest
+
+Do not run tests. Remind the user to use `Railbound: Run all tests` if test
+verification is needed.
