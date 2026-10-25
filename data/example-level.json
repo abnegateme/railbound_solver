@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "ruleset_version": "railbound-observed-v1",
+  "id": "example-straight-arrival",
+  "rows": 2,
+  "cols": 3,
+  "metadata": {
+    "title": "Small authored arrival example",
+    "world": "example",
+    "source": "manual"
+  },
+  "terrain": [
+    {
+      "cell": {
+        "row": 0,
+        "col": 0
+      },
+      "kind": "grass"
+    },
+    {
+      "cell": {
+        "row": 0,
+        "col": 1
+      },
+      "kind": "grass"
+    },
+    {
+      "cell": {
+        "row": 0,
+        "col": 2
+      },
+      "kind": "grass"
+    }
+  ],
+  "buildable_cells": [
+    {
+      "row": 0,
+      "col": 1
+    }
+  ],
+  "fixed_tracks": [
+    {
+      "id": "goal-track",
+      "cell": {
+        "row": 0,
+        "col": 2
+      },
+      "ports": [
+        "E",
+        "W"
+      ],
+      "transitions": [
+        {
+          "entry_port": "E",
+          "exit_port": "W"
+        }
+      ],
+      "fixed": true
+    }
+  ],
+  "actors": [
+    {
+      "id": "train-1",
+      "cell": {
+        "row": 0,
+        "col": 0
+      },
+      "direction": "E",
+      "actor_type": "train",
+      "number": 1,
+      "color": "blue"
+    }
+  ],
+  "switches": [],
+  "buttons": [],
+  "gates": [],
+  "tunnel_endpoints": [],
+  "rail_inventory": {
+    "total_budget": 1,
+    "piece_counts": [
+      {
+        "piece_kind": "straight",
+        "count": 1
+      }
+    ]
+  },
+  "win_condition": {
+    "required_arrivals": [
+      {
+        "actor_id": "train-1",
+        "target_cell": {
+          "row": 0,
+          "col": 2
+        },
+        "entry_port": "W"
+      }
+    ],
+    "arrival_order": [],
+    "required_couplings": []
+  }
+}

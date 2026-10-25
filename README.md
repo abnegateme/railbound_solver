@@ -162,6 +162,21 @@ manifest, so the exact output can be recreated from the screenshot and grid
 JSON. The command rejects a screenshot whose stored SHA-256 does not match the
 calibration.
 
+## Author a semantic level
+
+M4 introduces a screenshot-independent, versioned `level.json` contract. It
+contains the board dimensions, terrain/buildability, fixed tracks, actors,
+devices, rail inventory, and explicit win conditions. It intentionally does
+not implement movement or solving yet. Use `load_level()` and `save_level()`
+from `railbound.level_io` (or the package root) to validate and persist these
+documents.
+
+[`data/example-level.json`](data/example-level.json) is a small manually
+authored example. The complete field reference and validation rules are in
+[`docs/level-schema.md`](docs/level-schema.md). A level has no source image or
+recognition confidence: those remain separate evidence for a later review
+stage.
+
 ## Development
 
 Run **Tasks: Run Task** → `Railbound: Verify changes` for linting, type
