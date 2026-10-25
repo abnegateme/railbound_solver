@@ -6,11 +6,11 @@
     "remoteUser": "vscode",
     "updateRemoteUserUID": true,
     "shutdownAction": "stopCompose",
-    "postCreateCommand": "sudo chown -R $(id -u):$(id -g) /workspace /home/vscode/.codex && sudo chmod -R u+rwX /workspace /home/vscode/.codex",
+    "postCreateCommand": "bash .devcontainer/post-create.sh",
     "customizations": {
         "vscode": {
             "extensions": [
-                "openai.chatgpt",
+                "openai.chatgpt@26.1007.21434",
                 "ms-python.python",
                 "ms-python.vscode-pylance",
                 "ms-python.debugpy",

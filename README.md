@@ -1,7 +1,8 @@
 # Railbound Solver
 
-This project begins with an assisted, reproducible grid-calibration step for a
-Railbound screenshot. It does not yet recognize tiles or solve levels.
+This project begins with assisted, reproducible grid calibration and cell
+extraction for a Railbound screenshot. It does not yet recognize tiles or solve
+levels.
 
 ## Calibrate a grid
 
@@ -55,7 +56,10 @@ setting its dimensions. Then click the centers of any labeled cells whose
 markers do not align with the screenshot. Each additional reference refits the
 grid and shows RMS and maximum residual error. Zoom with the mouse wheel and
 use **Fit image** to restore the full screenshot. Save chooses `grid.json` and
-writes an `annotated_grid.png` next to it.
+writes an `annotated_grid.png` next to it. Once the four-point grid is fitted,
+choose a crop mode and click **Extract cells in memory**. The application opens
+a zoomable contact sheet and retains the normalized cells for the following
+recognition stage; no crop or calibration files are required for this flow.
 
 The host virtual environment is only for running and checking the application;
 use the devcontainer for editing, linting, types, and tests. It is a local
@@ -86,11 +90,38 @@ Pixels are always `(x, y)`; semantic grid coordinates are always `(row, col)`.
 The calibration points are cell centers, not corners. The overlay marks every
 cell center, row/column coordinate, grid boundary, origin, and both grid axes.
 
+## Extract normalized cell crops
+
+Given the screenshot used for calibration and its `grid.json`, M2 rectifies
+every grid cell into a consistently oriented, square BGR PNG. The default
+`core` mode excludes cell borders; `context` retains neighbouring image area.
+The command also writes a deterministic `manifest.json` and a labeled contact
+sheet for inspection.
+
+```bash
+python3 -m railbound extract \
+  --image data/screenshot.png \
+  --grid output/grid.json \
+  --output-dir output/crops \
+  --mode context --mask-mode cell
+```
+
+`--mask-mode cell` makes pixels beyond the target cell black in a contextual
+crop. This is useful where extra context helps review but decorative neighbours
+would otherwise affect later recognition. Crop settings are stored in the
+manifest, so the exact output can be recreated from the screenshot and grid
+JSON. The command rejects a screenshot whose stored SHA-256 does not match the
+calibration.
+
 ## Development
 
-Run the required checks from the repository root:
+Run **Tasks: Run Task** → `Railbound: Verify changes` for linting, type
+checking, and whitespace validation. The equivalent commands from the
+repository root are:
 
 ```bash
 ruff check .
-pytest
+mypy src
 ```
+
+Use the `Railbound: Run all tests` VS Code task for the full test suite.

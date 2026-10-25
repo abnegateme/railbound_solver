@@ -13,6 +13,15 @@
                 "isDefault": true
             },
             "problemMatcher": "$pytest"
+        },
+        {
+            "label": "Railbound: Verify changes",
+            "type": "shell",
+            "command": "ruff check . && mypy src && git diff --check",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": []
         }
     ]
 }

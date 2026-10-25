@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import cv2
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QColor, QImage, QMouseEvent, QPainter, QPixmap, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QGraphicsPixmapItem,
@@ -32,6 +34,7 @@ from railbound.calibration import (
     grid_from_three_points,
     image_sha256,
 )
+from railbound.extraction import CellCrop, CellExtractor, CropSpec, render_crop_contact_sheet
 from railbound.geometry import CellCoord, GridCalibrationPoint, GridGeometry, PixelPoint
 from railbound.grid_io import save_grid
 from railbound.rendering import ColorImage, render_grid_overlay
@@ -86,8 +89,30 @@ class CalibrationCanvas(QGraphicsView):
         event.accept()
 
 
+class CropPreviewWindow(QMainWindow):
+    """Zoomable contact-sheet view for in-memory normalized cell crops."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Railbound Solver — Extracted cells")
+        self.resize(1000, 800)
+        self._canvas = CalibrationCanvas()
+        self.setCentralWidget(self._canvas)
+
+        toolbar = QToolBar("Cell previews", self)
+        fit_action = QAction("Fit cells", self)
+        fit_action.triggered.connect(self._canvas.fit_in_view)
+        toolbar.addAction(fit_action)
+        self.addToolBar(toolbar)
+
+    def set_contact_sheet(self, contact_sheet: ColorImage) -> None:
+        """Replace the displayed contact sheet without persisting it to disk."""
+        self._canvas.set_image(_bgr_to_qimage(contact_sheet))
+        self._canvas.fit_in_view()
+
+
 class CalibrationWindow(QMainWindow):
-    """Window for choosing four cell centers and saving a calibrated grid."""
+    """Window for calibrating a grid and extracting its cells in memory."""
 
     def __init__(
         self,
@@ -103,10 +128,14 @@ class CalibrationWindow(QMainWindow):
         self._points: list[PixelPoint] = []
         self._reference_points: list[GridCalibrationPoint] = []
         self._grid: GridGeometry | None = None
+        self._crops: list[CellCrop] = []
+        self._crop_spec: CropSpec | None = None
+        self._contact_sheet: ColorImage | None = None
+        self._crop_preview: CropPreviewWindow | None = None
         self._grid_output = grid_output
         self._overlay_output = overlay_output
 
-        self.setWindowTitle("Railbound Solver — Calibrate grid")
+        self.setWindowTitle("Railbound Solver — Calibrate and extract")
         self.resize(1240, 820)
         self._canvas = CalibrationCanvas()
         self._canvas.point_selected.connect(self._select_point)
@@ -114,9 +143,10 @@ class CalibrationWindow(QMainWindow):
         self._cols = QSpinBox()
         for control in (self._rows, self._cols):
             control.setRange(2, 200)
-            control.valueChanged.connect(self._update_grid_from_dimensions)
         self._rows.setValue(8)
         self._cols.setValue(10)
+        for control in (self._rows, self._cols):
+            control.valueChanged.connect(self._update_grid_from_dimensions)
         self._instruction = QLabel()
         self._instruction.setWordWrap(True)
         self._status = QLabel()
@@ -147,6 +177,32 @@ class CalibrationWindow(QMainWindow):
         form.addRow("Columns", self._cols)
         layout.addLayout(form)
 
+        layout.addWidget(QLabel("Cell extraction"))
+        self._crop_mode = QComboBox()
+        self._crop_mode.addItem("Core (inside cell)")
+        self._crop_mode.addItem("Context (includes neighbours)")
+        self._crop_size = QSpinBox()
+        self._crop_size.setRange(16, 512)
+        self._crop_size.setValue(96)
+        self._cell_mask = QCheckBox("Mask outside target cell")
+        crop_form = QFormLayout()
+        crop_form.addRow("Mode", self._crop_mode)
+        crop_form.addRow("Output size", self._crop_size)
+        crop_form.addRow("", self._cell_mask)
+        layout.addLayout(crop_form)
+        self._extract_button = QPushButton("Extract cells in memory")
+        self._extract_button.clicked.connect(self._extract_cells)
+        self._show_crops_button = QPushButton("Show extracted cells")
+        self._show_crops_button.clicked.connect(self._show_crop_preview)
+        self._crop_summary = QLabel()
+        self._crop_summary.setWordWrap(True)
+        layout.addWidget(self._extract_button)
+        layout.addWidget(self._show_crops_button)
+        layout.addWidget(self._crop_summary)
+        self._crop_mode.currentIndexChanged.connect(self._crop_settings_changed)
+        self._crop_size.valueChanged.connect(self._crop_settings_changed)
+        self._cell_mask.toggled.connect(self._crop_settings_changed)
+
         undo_button = QPushButton("Undo last point")
         undo_button.clicked.connect(self._undo_last_point)
         reset_button = QPushButton("Start over")
@@ -164,6 +220,7 @@ class CalibrationWindow(QMainWindow):
         content_layout.addWidget(self._canvas, stretch=1)
         content_layout.addWidget(controls)
         self.setCentralWidget(content)
+        self._update_extraction_controls()
 
     def load_image(self, path: Path) -> None:
         image = cast(ColorImage | None, cv2.imread(str(path), cv2.IMREAD_COLOR))
@@ -222,6 +279,7 @@ class CalibrationWindow(QMainWindow):
     def _derive_dimensions_from_last_cell(self) -> None:
         if self._image is None or len(self._points) != len(_POINT_LABELS):
             return
+        self._clear_extraction()
         try:
             grid = grid_from_four_points(
                 image_width=self._image.shape[1],
@@ -235,6 +293,7 @@ class CalibrationWindow(QMainWindow):
         except ValueError as error:
             self._grid = None
             self._status.setText(f"Choose the fourth point again: {error}")
+            self._update_extraction_controls()
             return
 
         self._rows.blockSignals(True)
@@ -244,6 +303,7 @@ class CalibrationWindow(QMainWindow):
         self._rows.blockSignals(False)
         self._cols.blockSignals(False)
         self._grid = grid
+        self._update_extraction_controls()
         self._status.setText(
             f"Detected {grid.rows} rows × {grid.cols} columns from 4 references; "
             f"RMS error {grid.calibration.residual_rms_px:.2f} px. "
@@ -251,9 +311,11 @@ class CalibrationWindow(QMainWindow):
         )
 
     def _update_grid_from_dimensions(self) -> None:
+        self._clear_extraction()
         if self._image is None or len(self._points) < 3:
             self._grid = None
             self._refresh_canvas()
+            self._update_extraction_controls()
             return
         try:
             if len(self._points) == len(_POINT_LABELS):
@@ -285,6 +347,7 @@ class CalibrationWindow(QMainWindow):
             self._grid = None
             self._status.setText(str(error))
         self._refresh_canvas()
+        self._update_extraction_controls()
 
     def _undo_last_point(self) -> None:
         if self._reference_points:
@@ -299,7 +362,9 @@ class CalibrationWindow(QMainWindow):
         self._points.clear()
         self._reference_points.clear()
         self._grid = None
+        self._clear_extraction()
         self._refresh_canvas()
+        self._update_extraction_controls()
         self._update_instruction()
 
     def _update_instruction(self) -> None:
@@ -310,7 +375,7 @@ class CalibrationWindow(QMainWindow):
         else:
             self._instruction.setText(
                 "Grid is fitted. Click any labeled cell center to add a reference point, "
-                "or save it."
+                "extract cells in memory, or save it."
             )
 
     def _control_points(self) -> tuple[GridCalibrationPoint, ...]:
@@ -388,6 +453,82 @@ class CalibrationWindow(QMainWindow):
             return
         save_grid(self._grid, grid_path)
         self._status.setText(f"Saved {grid_path}\nSaved {overlay_path}")
+
+    @property
+    def extracted_crops(self) -> tuple[CellCrop, ...]:
+        """Return the current in-memory cells for future recognition stages."""
+        return tuple(self._crops)
+
+    def _crop_settings_changed(self) -> None:
+        self._clear_extraction()
+        self._update_extraction_controls()
+
+    def _update_extraction_controls(self) -> None:
+        ready = (
+            self._image is not None
+            and self._grid is not None
+            and len(self._points) == len(_POINT_LABELS)
+        )
+        self._crop_mode.setEnabled(ready)
+        self._crop_size.setEnabled(ready)
+        self._cell_mask.setEnabled(ready and self._crop_mode.currentIndex() == 1)
+        self._extract_button.setEnabled(ready)
+        self._show_crops_button.setEnabled(bool(self._crops))
+
+    def _clear_extraction(self) -> None:
+        had_extraction = self._contact_sheet is not None
+        self._crop_summary.setText(
+            "Cell previews are out of date; extract them again." if had_extraction else ""
+        )
+        self._crops = []
+        self._crop_spec = None
+        self._contact_sheet = None
+        if self._crop_preview is not None:
+            self._crop_preview.hide()
+
+    def _extract_cells(self) -> None:
+        if self._image is None or self._grid is None:
+            self._show_error("Finish a valid grid before extracting cells.")
+            return
+        mode: Literal["core", "context"] = (
+            "core" if self._crop_mode.currentIndex() == 0 else "context"
+        )
+        mask_mode: Literal["none", "cell"] = (
+            "cell" if mode == "context" and self._cell_mask.isChecked() else "none"
+        )
+        spec = CropSpec(
+            output_size=self._crop_size.value(),
+            mode=mode,
+            mask_mode=mask_mode,
+        )
+        try:
+            crops = CellExtractor().extract(self._image, self._grid, spec)
+            contact_sheet = render_crop_contact_sheet(crops, columns=self._grid.cols)
+        except ValueError as error:
+            self._show_error(f"Could not extract cells: {error}")
+            return
+
+        self._crops = crops
+        self._crop_spec = spec
+        self._contact_sheet = contact_sheet
+        self._crop_summary.setText(
+            f"Extracted {len(crops)} cells in memory ({spec.mode}, {spec.output_size} × "
+            f"{spec.output_size} px). No files were written."
+        )
+        self._status.setText("Grid calibrated and cells extracted in memory.")
+        self._update_extraction_controls()
+        self._show_crop_preview()
+
+    def _show_crop_preview(self) -> None:
+        if self._contact_sheet is None:
+            self._show_error("Extract cells before opening their preview.")
+            return
+        if self._crop_preview is None:
+            self._crop_preview = CropPreviewWindow(self)
+        self._crop_preview.set_contact_sheet(self._contact_sheet)
+        self._crop_preview.show()
+        self._crop_preview.raise_()
+        self._crop_preview.activateWindow()
 
     def _output_paths(self) -> tuple[Path, Path] | None:
         if self._grid_output is not None and self._overlay_output is not None:

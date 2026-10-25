@@ -258,7 +258,11 @@ calibration, bounds behavior, JSON round-trip, and overlay dimensions.
 
 **Inputs:** Screenshot and `GridGeometry`.
 
-**Deliverables:** Core and contextual crop modes, optional polygon mask, normalization settings, manifest, and debug contact sheet.
+**Deliverables:** Core and contextual crop modes, optional polygon mask,
+normalization settings, manifest, and debug contact sheet. The native GUI keeps
+the extracted cells and contact sheet in memory after calibration; writing
+files is an optional export/debug path rather than a prerequisite for the next
+interactive stage.
 
 **Proposed interfaces:** `CellExtractor.extract(image, grid, spec) -> list[CellCrop]` and `CropSpec(output_size, core_fraction, context_fraction, mask_mode)`.
 
@@ -266,7 +270,7 @@ calibration, bounds behavior, JSON round-trip, and overlay dimensions.
 
 **Tests:** Synthetic colored cells, border cells, orientation markers, crop dimensions, mask behavior, and deterministic manifests.
 
-**Acceptance criteria:** Every in-bounds cell yields one indexed crop of identical shape and orientation; extraction can be reproduced solely from image, grid JSON, and crop settings.
+**Acceptance criteria:** Every in-bounds cell yields one indexed crop of identical shape and orientation; extraction can be reproduced solely from image, grid JSON, and crop settings. In the GUI, a calibrated grid can proceed directly to an in-memory crop set without requiring intermediate files.
 
 **Risks:** Landscape leaking into crops, insufficient context for large objects, interpolation artifacts, and perspective distortion.
 
