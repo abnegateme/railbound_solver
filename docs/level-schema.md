@@ -40,8 +40,9 @@ lists each used port exactly once and contains transitions that pair those
 ports. A straight or curve has one pair; a crossing has two independent pairs.
 The validator rejects duplicated ports, ports missing from transitions, and
 transitions that mention undeclared ports. `fixed_tracks` must have `fixed` set
-to `true`; placeable rails are intentionally deferred to the separate M5
-`RailPlacement` document.
+to `true`. Placeable rails live in the separate M5 `RailPlacement` document,
+which can be paired with this level without changing its authoritative
+fixed-object data. See [`board-topology.md`](board-topology.md).
 
 ## Cross-object validation
 

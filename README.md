@@ -1,8 +1,9 @@
 # Railbound Solver
 
-This project begins with assisted, reproducible grid calibration and cell
-extraction for a Railbound screenshot. It does not yet recognize tiles or solve
-levels.
+This project provides assisted, reproducible grid calibration and cell
+extraction for a Railbound screenshot, a manually authored semantic level
+model, and static rail-topology compilation. It does not yet recognize tiles,
+simulate movement, or solve levels.
 
 The Windows interactive workflow is the primary user journey. Its individual
 CLI stages remain available for reproducible batch work, debugging, and tests.
@@ -176,6 +177,34 @@ authored example. The complete field reference and validation rules are in
 [`docs/level-schema.md`](docs/level-schema.md). A level has no source image or
 recognition confidence: those remain separate evidence for a later review
 stage.
+
+## Compile static rail topology
+
+M5 keeps a candidate solution separate from the level. A
+[`RailPlacement`](src/railbound/topology.py) names its target `level_id` and
+lists static `straight`, `curve`, or `crossing` rails by cell and cardinal
+orientation. [`data/example-placement.json`](data/example-placement.json)
+completes the example level. Load both documents and compile a port graph with
+`load_placement()` and `compile_board()`:
+
+```python
+from pathlib import Path
+
+from railbound import compile_board, load_level, load_placement
+
+level = load_level(Path("data/example-level.json"))
+placement = load_placement(Path("data/example-placement.json"))
+board = compile_board(level, placement)
+```
+
+The graph uses `(cell, N|E|S|W)` port nodes. `board.transition(port)` follows
+only the rail inside a cell; `board.adjacent(port)` crosses only into a
+neighbour with a matching facing port. `boundary_exits`, `unconnected_ports`,
+and `connected_components` expose static topology for inspection. This keeps
+crossing paths independent rather than treating a crossing as one connected
+cell. Placement validation rejects a wrong level ID, non-buildable cells,
+exceeding the total rail budget, and unavailable kinds or counts. See
+[`docs/board-topology.md`](docs/board-topology.md) for the full format.
 
 ## Development
 
