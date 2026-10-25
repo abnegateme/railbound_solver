@@ -13,3 +13,4 @@ data/*
 !data/.gitkeep
 output/
 !data/example-level.json
+!data/example-placement.json

@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "level_id": "example-straight-arrival",
+  "rails": [
+    {
+      "cell": {
+        "row": 0,
+        "col": 1
+      },
+      "piece_kind": "straight",
+      "orientation": "E"
+    }
+  ]
+}
