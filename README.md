@@ -2,8 +2,9 @@
 
 This project provides assisted, reproducible grid calibration and cell
 extraction for a Railbound screenshot, a manually authored semantic level
-model, and static rail-topology compilation. It does not yet recognize tiles,
-simulate movement, or solve levels.
+model, static rail-topology compilation, and deterministic replay of static
+tracks. It does not yet recognize tiles, simulate dynamic devices, or solve
+levels.
 
 The Windows interactive workflow is the primary user journey. Its individual
 CLI stages remain available for reproducible batch work, debugging, and tests.
@@ -205,6 +206,32 @@ crossing paths independent rather than treating a crossing as one connected
 cell. Placement validation rejects a wrong level ID, non-buildable cells,
 exceeding the total rail budget, and unavailable kinds or counts. See
 [`docs/board-topology.md`](docs/board-topology.md) for the full format.
+
+## Replay a static placement
+
+M6 replays fixed and placed rails with `simulate()`. The supplied example now
+includes a fixed start track, so its matching placement reaches the goal:
+
+```python
+from pathlib import Path
+
+from railbound import load_level, load_placement, simulate
+
+level = load_level(Path("data/example-level.json"))
+placement = load_placement(Path("data/example-placement.json"))
+result = simulate(level, placement)
+assert result.succeeded
+```
+
+The terminal result contains immutable actor state and an ordered event trace.
+An actor enters its current rail through the port opposite its declared travel
+direction; tracks must therefore be present at all active actor positions.
+Movement is simultaneous: invalid movement and collisions fail atomically.
+The current static milestone explicitly rejects switches, buttons, gates,
+tunnels, and coupling rather than guessing their behavior. Set
+`SimulationOptions(max_ticks=...)` to bound cyclic layouts. See
+[`docs/static-simulation.md`](docs/static-simulation.md) for tick precedence,
+events, and structured failure reasons.
 
 ## Development
 

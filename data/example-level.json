@@ -40,6 +40,24 @@
   ],
   "fixed_tracks": [
     {
+      "id": "start-track",
+      "cell": {
+        "row": 0,
+        "col": 0
+      },
+      "ports": [
+        "E",
+        "W"
+      ],
+      "transitions": [
+        {
+          "entry_port": "E",
+          "exit_port": "W"
+        }
+      ],
+      "fixed": true
+    },
+    {
       "id": "goal-track",
       "cell": {
         "row": 0,
