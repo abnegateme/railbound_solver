@@ -29,8 +29,8 @@ Run type checking with:
 - Add type annotations to public functions.
 - Prefer pathlib over os.path.
 - Keep functions small.
-- Keep documentation concise and concrete. Do not overcomplicate wording,
-  repeat information, or add unnecessary detail and filler.
+- Keep documentation compact without losing essential detail; prefer short
+  files and split documents when that improves clarity.
 - Use Python tooling to apply changes from inside the devcontainer.
 - Do not create temporary files or backup copies, including files with `.bak` or `.orig` suffixes.
 - Do not modify tests merely to make failing code pass.

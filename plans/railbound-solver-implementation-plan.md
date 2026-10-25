@@ -159,51 +159,21 @@ A compiled NetworkX graph may be useful for validation, reachability, and solver
 
 ### Scaling mechanics beyond the static graph
 
-The port graph is the stable topology layer, not a universal representation of
-all game rules. It scales naturally to new rail shapes and static topology,
-but a button, station, semaphore, passenger, decoy, or other future object
-may also require state, timing, or an interaction with another object.
-
-Treat every supported mechanic as four explicit additions:
-
-1. A validated semantic definition in `Level`, independent of pixels.
-2. Immutable compiled data attached to the board when it affects topology or
-   location-based lookup.
-3. A typed runtime-state field plus deterministic transition/effect function
-   when it can change during replay.
-4. Structured events, rule-focused microboards, and documented tick
-   precedence for every externally visible effect.
-
-The simulator should retain one common transition boundary:
+The port graph models topology; dynamic rules live in the state space above it.
+For each new mechanic, add only: validated `Level` data, compiled lookup data
+when needed, typed runtime state and deterministic effects, then events and
+microboards. Keep the common boundary:
 
 ```text
 next_state, events = step(state, compiled_board)
 ```
 
-Before adding the next qualitatively different dynamic mechanic after M7,
-extract device-specific code behind a common mechanics interface or registry.
-It must expose topology/entry handling, post-movement effects, state
-validation, and deterministic event generation without making pixels or
-recognition data visible to the simulator. This prevents `simulation.py` from
-becoming a growing collection of unrelated conditional branches while keeping
-observed rules explicit.
-
-The eventual solver searches a state space layered over the port graph, not
-only graph paths. A runtime search node must be able to include at least:
-
-```text
-(actor positions and travel directions,
- dynamic device states,
- goal/progress state,
- tick or equivalent timing state)
-```
-
-Rail placement remains a separate candidate design variable. The simulator is
-the authority for edges in this runtime state space: a solver may use static
-graph reachability for pruning, but must replay every proposed solution using
-the same `step()` semantics. Add inventory, consist/coupling, waiting, or
-other mechanic-specific state to the node only when an observed rule requires
-it.
+Before the next distinct dynamic-mechanic family, extract a mechanics
+interface/registry for entry handling, post-movement effects, state validation,
+and event generation. The solver searches runtime nodes containing actor
+positions/directions, dynamic state, progress, and timing; placement remains a
+separate candidate. Static reachability may prune, but `step()` defines valid
+edges. Add further state only for observed rules.
 
 ### Simulation and events
 
