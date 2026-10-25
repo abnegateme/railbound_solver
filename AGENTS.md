@@ -6,15 +6,14 @@ Python 3.14 application.
 
 ## Development
 
-Run the full test suite from VS Code with **Tasks: Run Test Task** or the
-`Railbound: Run all tests` task.
+The user runs project verification from VS Code:
 
-Agents must not run `pytest` or invoke the VS Code test task. Ask the user to
-run it and report its result instead.
+- **Tasks: Run Test Task** or `Railbound: Run all tests` runs the full test suite.
+- `Railbound: Verify changes` runs linting, type checking, and diff validation.
 
-Run linting with:
-
-    ruff check .
+Agents must not run either VS Code task or their underlying commands: `pytest`,
+`ruff check .`, `mypy src`, or `git diff --check`. Ask the user to run the
+relevant task and report its result when verification is needed.
 
 Run formatting with:
 
@@ -37,9 +36,5 @@ Run type checking with:
 
 ## Before completing a task
 
-Run:
-
-    ruff check .
-
-Do not run tests. Remind the user to use `Railbound: Run all tests` if test
-verification is needed.
+Do not run verification commands. Remind the user to use the relevant VS Code
+task when test or change verification is needed.

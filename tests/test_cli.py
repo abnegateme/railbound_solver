@@ -5,9 +5,25 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from railbound.cli import main
+from railbound.cli import build_parser, main
 from railbound.geometry import GridGeometry, PixelPoint
 from railbound.grid_io import load_grid, save_grid
+
+
+def _lattice_image() -> np.ndarray:
+    image = np.zeros((340, 440, 3), dtype=np.uint8)
+    for x in range(60, 361, 50):
+        cv2.line(image, (x, 50), (x, 275), (255, 255, 255), 2, cv2.LINE_8)
+    for y in range(50, 276, 45):
+        cv2.line(image, (60, y), (360, y), (255, 255, 255), 2, cv2.LINE_8)
+    return image
+
+
+def test_interactive_command_is_a_separate_cli_entrypoint() -> None:
+    arguments = build_parser().parse_args(["interactive", "--image", "input.png"])
+
+    assert arguments.command == "interactive"
+    assert arguments.image == Path("input.png")
 
 
 def test_calibrate_command_writes_portable_grid_and_overlay(tmp_path: Path) -> None:
@@ -89,3 +105,32 @@ def test_extract_command_writes_crops_manifest_and_contact_sheet(tmp_path: Path)
     crop = cv2.imread(str(output_directory / "r001_c001.png"), cv2.IMREAD_COLOR)
     assert crop is not None
     assert crop.shape == (96, 96, 3)
+
+
+def test_detect_command_writes_a_confident_grid_and_debug_overlay(tmp_path: Path) -> None:
+    image_path = tmp_path / "input.png"
+    grid_path = tmp_path / "artifacts" / "grid.json"
+    overlay_path = tmp_path / "artifacts" / "detected_grid.png"
+    assert cv2.imwrite(str(image_path), _lattice_image())
+
+    result = main(
+        [
+            "detect",
+            "--image",
+            str(image_path),
+            "--rows",
+            "5",
+            "--cols",
+            "6",
+            "--min-cell-size",
+            "30",
+            "--grid-output",
+            str(grid_path),
+            "--overlay-output",
+            str(overlay_path),
+        ]
+    )
+
+    assert result == 0
+    assert load_grid(grid_path).calibration.method == "automatic_edge_lattice"
+    assert cv2.imread(str(overlay_path), cv2.IMREAD_COLOR) is not None

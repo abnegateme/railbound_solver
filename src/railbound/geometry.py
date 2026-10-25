@@ -66,15 +66,23 @@ class GridCalibrationPoint(_FrozenModel):
 
 
 class GridCalibration(_FrozenModel):
-    """Manual control points and provenance for a fitted affine grid."""
+    """Reference points and provenance for a fitted affine grid.
+
+    ``control_points`` are selected by a person for manual calibrations and
+    inferred from visible cell boundaries for automatic candidates.  They are
+    retained in either case so a saved grid documents the evidence behind its
+    affine fit.
+    """
 
     origin: PixelPoint
     next_col: PixelPoint
     next_row: PixelPoint
     control_points: tuple[GridCalibrationPoint, ...] = ()
-    method: Literal["manual_three_point_affine", "manual_multi_point_affine"] = (
-        "manual_three_point_affine"
-    )
+    method: Literal[
+        "manual_three_point_affine",
+        "manual_multi_point_affine",
+        "automatic_edge_lattice",
+    ] = "manual_three_point_affine"
     residual_rms_px: Annotated[float, Field(ge=0.0)] = 0.0
     residual_max_px: Annotated[float, Field(ge=0.0)] = 0.0
 

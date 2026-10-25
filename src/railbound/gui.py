@@ -34,6 +34,12 @@ from railbound.calibration import (
     grid_from_three_points,
     image_sha256,
 )
+from railbound.detection import (
+    CalibrationCandidate,
+    GridDetectionHints,
+    GridDetector,
+    render_detection_overlay,
+)
 from railbound.extraction import CellCrop, CellExtractor, CropSpec, render_crop_contact_sheet
 from railbound.geometry import CellCoord, GridCalibrationPoint, GridGeometry, PixelPoint
 from railbound.grid_io import save_grid
@@ -120,6 +126,7 @@ class CalibrationWindow(QMainWindow):
         image_path: Path | None = None,
         grid_output: Path | None = None,
         overlay_output: Path | None = None,
+        automatic_detection: bool = False,
     ) -> None:
         super().__init__()
         self._image: ColorImage | None = None
@@ -134,6 +141,9 @@ class CalibrationWindow(QMainWindow):
         self._crop_preview: CropPreviewWindow | None = None
         self._grid_output = grid_output
         self._overlay_output = overlay_output
+        self._automatic_detection = automatic_detection
+        self._detection_candidates: list[CalibrationCandidate] = []
+        self._detect_button: QPushButton | None = None
 
         self.setWindowTitle("Railbound Solver — Calibrate and extract")
         self.resize(1240, 820)
@@ -146,7 +156,7 @@ class CalibrationWindow(QMainWindow):
         self._rows.setValue(8)
         self._cols.setValue(10)
         for control in (self._rows, self._cols):
-            control.valueChanged.connect(self._update_grid_from_dimensions)
+            control.valueChanged.connect(self._dimensions_changed)
         self._instruction = QLabel()
         self._instruction.setWordWrap(True)
         self._status = QLabel()
@@ -176,6 +186,11 @@ class CalibrationWindow(QMainWindow):
         form.addRow("Rows", self._rows)
         form.addRow("Columns", self._cols)
         layout.addLayout(form)
+
+        if self._automatic_detection:
+            self._detect_button = QPushButton("Propose grid from visible edges")
+            self._detect_button.clicked.connect(self._propose_grid)
+            layout.addWidget(self._detect_button)
 
         layout.addWidget(QLabel("Cell extraction"))
         self._crop_mode = QComboBox()
@@ -233,6 +248,8 @@ class CalibrationWindow(QMainWindow):
         self._reset_points()
         self._canvas.fit_in_view()
         self._status.setText(f"Loaded {path.name} ({image.shape[1]} × {image.shape[0]} px)")
+        if self._automatic_detection:
+            self._propose_grid()
 
     def _open_image_dialog(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
@@ -250,6 +267,7 @@ class CalibrationWindow(QMainWindow):
             return
         point = PixelPoint(x=x, y=y)
         if len(self._points) < len(_POINT_LABELS):
+            self._detection_candidates.clear()
             self._points.append(point)
             if len(self._points) == len(_POINT_LABELS):
                 self._derive_dimensions_from_last_cell()
@@ -274,7 +292,78 @@ class CalibrationWindow(QMainWindow):
             )
             return
         self._reference_points.append(GridCalibrationPoint(cell=nearest.cell, pixel=point))
+        self._detection_candidates.clear()
         self._update_grid_from_dimensions()
+
+    def _propose_grid(self) -> None:
+        """Propose and visibly score a grid, retaining manual calibration as fallback."""
+        if self._image is None:
+            self._show_error("Open a screenshot before proposing a grid.")
+            return
+        self._clear_extraction()
+        try:
+            candidates = GridDetector().propose(
+                self._image,
+                GridDetectionHints(image_sha256=self._image_hash),
+            )
+        except ValueError as error:
+            self._show_error(f"Could not inspect this image: {error}")
+            return
+
+        self._detection_candidates = candidates
+        if not candidates:
+            self._grid = None
+            self._points.clear()
+            self._reference_points.clear()
+            self._status.setText(
+                "No regular grid was detected. Select the four manual calibration points."
+            )
+            self._refresh_canvas()
+            self._update_extraction_controls()
+            self._update_instruction()
+            return
+
+        candidate = candidates[0]
+        if not candidate.is_confident(0.70):
+            self._grid = None
+            self._points.clear()
+            self._reference_points.clear()
+            self._status.setText(
+                f"Best proposal has confidence {candidate.confidence:.2f}; "
+                "manual calibration is required below 0.70."
+            )
+            self._refresh_canvas()
+            self._update_extraction_controls()
+            self._update_instruction()
+            return
+
+        self._adopt_detection(candidate)
+        self._status.setText(
+            f"Accepted proposal 1 of {len(candidates)}: {candidate.grid.rows} rows × "
+            f"{candidate.grid.cols} columns, confidence {candidate.confidence:.2f}, "
+            f"RMS error {candidate.residual_rms_px:.2f} px. "
+            "Click labeled cell centers to refine it manually."
+        )
+        self._refresh_canvas()
+        self._update_extraction_controls()
+        self._update_instruction()
+
+    def _adopt_detection(self, candidate: CalibrationCandidate) -> None:
+        """Make one accepted automatic proposal editable by the M1 controls."""
+        self._grid = candidate.grid
+        self._reference_points.clear()
+        self._points = [
+            candidate.grid.grid_to_pixel(0, 0),
+            candidate.grid.grid_to_pixel(0, 1),
+            candidate.grid.grid_to_pixel(1, 0),
+            candidate.grid.grid_to_pixel(candidate.grid.rows - 1, candidate.grid.cols - 1),
+        ]
+        self._rows.blockSignals(True)
+        self._cols.blockSignals(True)
+        self._rows.setValue(candidate.grid.rows)
+        self._cols.setValue(candidate.grid.cols)
+        self._rows.blockSignals(False)
+        self._cols.blockSignals(False)
 
     def _derive_dimensions_from_last_cell(self) -> None:
         if self._image is None or len(self._points) != len(_POINT_LABELS):
@@ -309,6 +398,11 @@ class CalibrationWindow(QMainWindow):
             f"RMS error {grid.calibration.residual_rms_px:.2f} px. "
             "Click any labeled cell center to add another reference."
         )
+
+    def _dimensions_changed(self) -> None:
+        """Discard an automatic proposal once a user edits its assumed dimensions."""
+        self._detection_candidates.clear()
+        self._update_grid_from_dimensions()
 
     def _update_grid_from_dimensions(self) -> None:
         self._clear_extraction()
@@ -350,6 +444,7 @@ class CalibrationWindow(QMainWindow):
         self._update_extraction_controls()
 
     def _undo_last_point(self) -> None:
+        self._detection_candidates.clear()
         if self._reference_points:
             self._reference_points.pop()
         elif self._points:
@@ -361,6 +456,7 @@ class CalibrationWindow(QMainWindow):
     def _reset_points(self) -> None:
         self._points.clear()
         self._reference_points.clear()
+        self._detection_candidates.clear()
         self._grid = None
         self._clear_extraction()
         self._refresh_canvas()
@@ -399,6 +495,8 @@ class CalibrationWindow(QMainWindow):
         if self._image is None:
             return
         preview = self._image.copy()
+        if self._detection_candidates:
+            preview = render_detection_overlay(preview, self._detection_candidates)
         if self._grid is not None:
             preview = render_grid_overlay(preview, self._grid)
         for index, point in enumerate(self._points):
@@ -474,6 +572,8 @@ class CalibrationWindow(QMainWindow):
         self._cell_mask.setEnabled(ready and self._crop_mode.currentIndex() == 1)
         self._extract_button.setEnabled(ready)
         self._show_crops_button.setEnabled(bool(self._crops))
+        if self._detect_button is not None:
+            self._detect_button.setEnabled(self._image is not None)
 
     def _clear_extraction(self) -> None:
         had_extraction = self._contact_sheet is not None
@@ -557,6 +657,7 @@ def run_calibration_gui(
     image_path: Path | None,
     grid_output: Path | None,
     overlay_output: Path | None,
+    automatic_detection: bool = False,
 ) -> int:
     """Open the native calibration window and return Qt's process exit code."""
     application = QApplication.instance()
@@ -566,6 +667,7 @@ def run_calibration_gui(
             image_path=image_path,
             grid_output=grid_output,
             overlay_output=overlay_output,
+            automatic_detection=automatic_detection,
         )
         window.show()
         return cast(int, application.exec())
@@ -574,6 +676,7 @@ def run_calibration_gui(
         image_path=image_path,
         grid_output=grid_output,
         overlay_output=overlay_output,
+        automatic_detection=automatic_detection,
     )
     window.show()
     return 0

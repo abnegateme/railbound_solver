@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import os
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
+import cv2
 import numpy as np
 import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 pytest.importorskip("PySide6")
 
@@ -13,6 +14,30 @@ from PySide6.QtWidgets import QApplication
 
 from railbound.geometry import GridGeometry, PixelPoint
 from railbound.gui import CalibrationWindow
+
+
+def _lattice_image() -> np.ndarray:
+    image = np.zeros((340, 440, 3), dtype=np.uint8)
+    for x in range(60, 361, 50):
+        cv2.line(image, (x, 50), (x, 275), (255, 255, 255), 2, cv2.LINE_8)
+    for y in range(50, 276, 45):
+        cv2.line(image, (60, y), (360, y), (255, 255, 255), 2, cv2.LINE_8)
+    return image
+
+
+def test_interactive_gui_adopts_a_confident_detection_as_editable_calibration() -> None:
+    application = QApplication.instance() or QApplication([])
+    window = CalibrationWindow(automatic_detection=True)
+    window._image = _lattice_image()
+
+    window._propose_grid()
+
+    assert application is not None
+    assert window._grid is not None
+    assert window._grid.calibration.method == "automatic_edge_lattice"
+    assert len(window._points) == 4
+    assert "Accepted proposal" in window._status.text()
+    window.close()
 
 
 def test_gui_extracts_calibrated_cells_without_writing_files() -> None:

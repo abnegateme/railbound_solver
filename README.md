@@ -4,6 +4,9 @@ This project begins with assisted, reproducible grid calibration and cell
 extraction for a Railbound screenshot. It does not yet recognize tiles or solve
 levels.
 
+The Windows interactive workflow is the primary user journey. Its individual
+CLI stages remain available for reproducible batch work, debugging, and tests.
+
 ## Calibrate a grid
 
 The devcontainer uses the official Python 3.14 image and installs the core
@@ -45,10 +48,13 @@ This creates `.venv-gui` and installs the current source non-editably with its
 window to check the same runtime-style environment used for local release:
 
 ```powershell
-.\.venv-gui\Scripts\python.exe -m railbound calibrate --interactive --image data\Railbound-1-13.PNG
+.\.venv-gui\Scripts\python.exe -m railbound interactive --image data\Railbound-1-13.PNG
 ```
 
-Click four cell centers in the shown order: the upper-left cell `(0, 0)`, its
+The interactive workflow first proposes a grid and draws its candidates over
+the screenshot. A proposal at confidence at least `0.70` becomes editable;
+otherwise the window visibly asks for manual calibration. For that fallback,
+click four cell centers in the shown order: the upper-left cell `(0, 0)`, its
 right neighbor `(0, 1)`, its lower neighbor `(1, 0)`, and the bottom-right
 cell. The final click derives the number of rows and columns and becomes a
 fourth calibration reference; it refines the affine grid rather than merely
@@ -56,9 +62,9 @@ setting its dimensions. Then click the centers of any labeled cells whose
 markers do not align with the screenshot. Each additional reference refits the
 grid and shows RMS and maximum residual error. Zoom with the mouse wheel and
 use **Fit image** to restore the full screenshot. Save chooses `grid.json` and
-writes an `annotated_grid.png` next to it. Once the four-point grid is fitted,
-choose a crop mode and click **Extract cells in memory**. The application opens
-a zoomable contact sheet and retains the normalized cells for the following
+writes an `annotated_grid.png` next to it. Once the grid is fitted, choose a
+crop mode and click **Extract cells in memory**. The application opens a
+zoomable contact sheet and retains the normalized cells for the following
 recognition stage; no crop or calibration files are required for this flow.
 
 The host virtual environment is only for running and checking the application;
@@ -89,6 +95,49 @@ the digest records which image it belongs to.
 Pixels are always `(x, y)`; semantic grid coordinates are always `(row, col)`.
 The calibration points are cell centers, not corners. The overlay marks every
 cell center, row/column coordinate, grid boundary, origin, and both grid axes.
+
+## Propose a grid automatically
+
+M3 can propose a grid from regularly spaced visible board boundaries. It uses
+Hough lines only to generate hypotheses, then scores the fitted affine lattice
+for geometric regularity, residual error, and edge support. It never silently
+turns a weak proposal into a calibration: inspect the debug overlay and fall
+back to the manual command above when its reported confidence is insufficient.
+
+Known dimensions are optional but useful on visually busy screenshots:
+
+```bash
+python3 -m railbound detect \
+  --image data/screenshot.png \
+  --rows 8 --cols 10 \
+  --grid-output output/grid.json \
+  --overlay-output output/detected_grid.png
+```
+
+The command writes `grid.json` only when the strongest proposal reaches the
+default confidence of `0.70`; adjust it with `--min-confidence` only after
+reviewing the overlay. `--min-cell-size` and `--max-cell-size` narrow the
+search where display scale is known. An exit status of 2 means that no
+candidate was confident enough, and does not alter any manual calibration.
+
+## Assisted interactive workflow
+
+Use the dedicated interactive command to open a screenshot, propose a grid,
+review the overlay, manually refine any cell centers, extract cells in memory,
+and save when satisfied:
+
+```bash
+python3 -m railbound interactive --image data/screenshot.png
+```
+
+The proposal runs when an image is opened and can be rerun with **Propose grid
+from visible edges**. The UI accepts only confidence at least `0.70`; lower
+confidence candidates remain visible in the debug overlay and the UI asks for
+the original four manual points. An accepted proposal seeds those same four
+editable references, so any click-based correction switches naturally to the
+existing manual affine fit. `calibrate`, `detect`, and `extract` remain the
+separate, scriptable stage commands. On Windows, install the `gui` extra as
+described above before using this workflow.
 
 ## Extract normalized cell crops
 

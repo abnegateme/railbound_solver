@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 from railbound.calibration import grid_from_three_points, image_sha256
 from railbound.crop_io import write_crop_set
+from railbound.detection import GridDetectionHints, GridDetector, render_detection_overlay
 from railbound.extraction import CellExtractor, CropSpec, render_crop_contact_sheet
 from railbound.geometry import PixelPoint
 from railbound.grid_io import load_grid, save_grid
@@ -78,6 +79,49 @@ def build_parser() -> argparse.ArgumentParser:
         default="none",
         help="mask contextual pixels outside the target cell",
     )
+
+    detect = commands.add_parser(
+        "detect", help="propose a grid from repeated visible board boundaries"
+    )
+    detect.add_argument("--image", type=Path, help="source screenshot")
+    detect.add_argument("--rows", type=int, help="known number of grid rows, if available")
+    detect.add_argument("--cols", type=int, help="known number of grid columns, if available")
+    detect.add_argument(
+        "--min-cell-size",
+        type=float,
+        default=16.0,
+        help="smallest plausible cell side length in pixels",
+    )
+    detect.add_argument(
+        "--max-cell-size",
+        type=float,
+        help="largest plausible cell side length in pixels",
+    )
+    detect.add_argument(
+        "--min-confidence",
+        type=float,
+        default=0.70,
+        help="minimum confidence required before writing a grid",
+    )
+    detect.add_argument(
+        "--grid-output",
+        type=Path,
+        help="destination grid.json for the strongest accepted candidate",
+    )
+    detect.add_argument(
+        "--overlay-output",
+        type=Path,
+        help="destination debug overlay PNG, including low-confidence candidates",
+    )
+
+    interactive = commands.add_parser(
+        "interactive", help="open the assisted detection and calibration window"
+    )
+    interactive.add_argument("--image", type=Path, help="source screenshot to open")
+    interactive.add_argument("--grid-output", type=Path, help="destination grid.json")
+    interactive.add_argument(
+        "--overlay-output", type=Path, help="destination annotated_grid.png"
+    )
     return parser
 
 
@@ -91,6 +135,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _calibrate(arguments, parser)
     if arguments.command == "extract":
         return _extract(arguments, parser)
+    if arguments.command == "detect":
+        return _detect(arguments, parser)
+    if arguments.command == "interactive":
+        return _interactive(arguments, parser)
     parser.error(f"unsupported command: {arguments.command}")
 
 
@@ -125,6 +173,15 @@ def _calibrate(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -
 
 
 def _interactive_calibrate(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    return _interactive(arguments, parser, automatic_detection=False)
+
+
+def _interactive(
+    arguments: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+    *,
+    automatic_detection: bool = True,
+) -> int:
     if (arguments.grid_output is None) != (arguments.overlay_output is None):
         parser.error(
             "--grid-output and --overlay-output must be supplied together in interactive mode"
@@ -134,7 +191,7 @@ def _interactive_calibrate(arguments: argparse.Namespace, parser: argparse.Argum
     except ModuleNotFoundError as error:
         if error.name == "PySide6":
             parser.error(
-                "interactive calibration requires the GUI extra; install the project with .[gui]"
+                "the interactive workflow requires the GUI extra; install the project with .[gui]"
             )
         raise
 
@@ -142,6 +199,7 @@ def _interactive_calibrate(arguments: argparse.Namespace, parser: argparse.Argum
         image_path=arguments.image,
         grid_output=arguments.grid_output,
         overlay_output=arguments.overlay_output,
+        automatic_detection=automatic_detection,
     )
 
 
@@ -186,6 +244,54 @@ def _extract(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -> 
     return 0
 
 
+def _detect(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    _validate_detection_arguments(arguments, parser)
+    image = cast(ColorImage | None, cv2.imread(str(arguments.image), cv2.IMREAD_UNCHANGED))
+    if image is None:
+        parser.error(f"could not read image: {arguments.image}")
+
+    try:
+        hints = GridDetectionHints(
+            rows=arguments.rows,
+            cols=arguments.cols,
+            min_cell_size_px=arguments.min_cell_size,
+            max_cell_size_px=arguments.max_cell_size,
+            image_sha256=image_sha256(arguments.image),
+        )
+        candidates = GridDetector().propose(image, hints)
+        if arguments.overlay_output is not None:
+            overlay = render_detection_overlay(image, candidates)
+            arguments.overlay_output.parent.mkdir(parents=True, exist_ok=True)
+            if not cv2.imwrite(str(arguments.overlay_output), overlay):
+                raise OSError(f"could not write detection overlay: {arguments.overlay_output}")
+    except (OSError, ValidationError, ValueError) as error:
+        parser.error(str(error))
+
+    for index, candidate in enumerate(candidates, start=1):
+        print(
+            f"Candidate {index}: {candidate.grid.rows} rows x {candidate.grid.cols} columns, "
+            f"confidence {candidate.confidence:.2f}, "
+            f"RMS residual {candidate.residual_rms_px:.2f} px"
+        )
+    if arguments.overlay_output is not None:
+        print(f"Wrote {arguments.overlay_output}")
+
+    accepted = next(
+        (candidate for candidate in candidates if candidate.is_confident(arguments.min_confidence)),
+        None,
+    )
+    if accepted is None:
+        print(
+            "No grid candidate reached the requested confidence; "
+            "use the manual 'calibrate' command instead."
+        )
+        return 2
+    if arguments.grid_output is not None:
+        save_grid(accepted.grid, arguments.grid_output)
+        print(f"Wrote {arguments.grid_output}")
+    return 0
+
+
 def _validate_scripted_arguments(
     arguments: argparse.Namespace, parser: argparse.ArgumentParser
 ) -> None:
@@ -215,6 +321,15 @@ def _validate_extraction_arguments(
     ]
     if missing:
         parser.error(f"crop extraction requires: {', '.join(missing)}")
+
+
+def _validate_detection_arguments(
+    arguments: argparse.Namespace, parser: argparse.ArgumentParser
+) -> None:
+    if arguments.image is None:
+        parser.error("grid detection requires: --image")
+    if not 0.0 <= arguments.min_confidence <= 1.0:
+        parser.error("--min-confidence must be between 0 and 1")
 
 
 def _validate_source_image_hash(image_path: Path, expected_hash: str | None) -> None:

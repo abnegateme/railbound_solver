@@ -49,6 +49,7 @@ Core principles:
 8. **Determinism is mandatory.** Coordinate rounding, candidate ordering, simultaneous movement resolution, solver tie-breaking, and event ordering must be explicitly defined.
 9. **Automation must fail visibly.** Low-confidence grid or object recognition should request manual correction rather than silently producing a plausible but incorrect level.
 10. **Start with observed mechanics.** Do not create a universal Railbound ontology before examining representative levels. Add semantic types as mechanics require them.
+11. **The interactive session is the primary product workflow.** A user should be able to open a screenshot, review and correct recognition, progress to a semantic level, simulate, solve, and inspect the explanation without leaving the interactive session. CLI stage commands remain for deterministic batch work, debugging, and tests; they are not the primary user journey.
 
 ### Execution boundary
 
@@ -278,11 +279,11 @@ interactive stage.
 
 ### M3 — Assisted and automatic grid detection
 
-**Goal:** Reduce manual calibration while retaining a reliable fallback.
+**Goal:** Begin an interactive session with an automatic grid proposal, reducing manual calibration while retaining a reliable fallback.
 
 **Inputs:** Reference screenshots and M1 geometry/error metrics.
 
-**Deliverables:** Calibration candidates with confidence, residuals, and debug overlays.
+**Deliverables:** Calibration candidates with confidence, residuals, and debug overlays; an interactive proposal/review step that adopts only a confident candidate and falls back visibly to M1 manual calibration.
 
 **Proposed interfaces:** `GridDetector.propose(image, hints) -> list[CalibrationCandidate]`.
 
@@ -290,7 +291,7 @@ interactive stage.
 
 **Tests:** Reference screenshots with expected centers, perturbation tests, and negative images that must produce low confidence.
 
-**Acceptance criteria:** The detector either finds a grid within the agreed pixel tolerance or explicitly reports insufficient confidence; manual M1 calibration always remains available.
+**Acceptance criteria:** Opening a screenshot in the interactive workflow automatically proposes a grid within the agreed pixel tolerance or explicitly reports insufficient confidence; manual M1 calibration always remains available. The separate stage commands remain reproducible support tools.
 
 **Risks:** Artwork and rails create false edges; aspect ratios and display scaling vary; perspective may violate the affine model.
 

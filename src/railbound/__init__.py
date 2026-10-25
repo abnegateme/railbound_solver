@@ -8,6 +8,12 @@ from railbound.crop_io import (
     save_crop_manifest,
     write_crop_set,
 )
+from railbound.detection import (
+    CalibrationCandidate,
+    GridDetectionHints,
+    GridDetector,
+    render_detection_overlay,
+)
 from railbound.extraction import CellCrop, CellExtractor, CropSpec, render_crop_contact_sheet
 from railbound.geometry import (
     CellCoord,
@@ -24,11 +30,14 @@ __all__ = [
     "CellCoord",
     "CellCrop",
     "CellExtractor",
+    "CalibrationCandidate",
     "CropManifest",
     "CropRecord",
     "CropSpec",
     "GridCalibration",
     "GridCalibrationPoint",
+    "GridDetectionHints",
+    "GridDetector",
     "GridGeometry",
     "GridPoint",
     "NearestCell",
@@ -37,6 +46,7 @@ __all__ = [
     "load_crop_manifest",
     "load_grid",
     "render_crop_contact_sheet",
+    "render_detection_overlay",
     "save_crop_manifest",
     "save_grid",
     "write_crop_set",
