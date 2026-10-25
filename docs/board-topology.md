@@ -5,6 +5,18 @@ deterministic port graph. It does not move actors or mutate device state. The
 compiled board retains immutable switch, button, gate, and tunnel definitions
 for M7 simulation; their runtime behavior remains outside the static graph.
 
+## Compile a placement
+
+```python
+from pathlib import Path
+
+from railbound import compile_board, load_level, load_placement
+
+level = load_level(Path("data/example-level.json"))
+placement = load_placement(Path("data/example-placement.json"))
+board = compile_board(level, placement)
+```
+
 ## Placement document
 
 `RailPlacement` is a versioned JSON document that names the level it belongs

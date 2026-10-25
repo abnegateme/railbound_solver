@@ -11,18 +11,27 @@ import cv2
 from pydantic import ValidationError
 
 from railbound.calibration import grid_from_three_points, image_sha256
-from railbound.crop_io import write_crop_set
+from railbound.crop_io import load_crop_manifest, write_crop_set
 from railbound.detection import GridDetectionHints, GridDetector, render_detection_overlay
 from railbound.extraction import CellExtractor, CropSpec, render_crop_contact_sheet
 from railbound.geometry import PixelPoint
 from railbound.grid_io import load_grid, save_grid
+from railbound.recognition import RecognitionThresholds, TemplateRecognizer, resolve
+from railbound.recognition_io import (
+    load_recognition_overrides,
+    load_template_catalog,
+    load_template_images,
+    recognize_crop_directory,
+    save_level_draft,
+    save_recognition_report,
+)
 from railbound.rendering import ColorImage, render_grid_overlay
 
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser without reading input or changing state."""
     parser = argparse.ArgumentParser(
-        description="Calibrate an affine Railbound grid from three cell centers."
+        description="Calibrate, extract, and recognize Railbound boards."
     )
     commands = parser.add_subparsers(dest="command", required=True)
     calibrate = commands.add_parser("calibrate", help="calibrate a grid from a screenshot")
@@ -114,14 +123,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="destination debug overlay PNG, including low-confidence candidates",
     )
 
+    recognize = commands.add_parser(
+        "recognize", help="match normalized crops to labelled template references"
+    )
+    recognize.add_argument(
+        "--crops-dir", type=Path, help="directory containing extracted crop PNGs"
+    )
+    recognize.add_argument(
+        "--manifest", type=Path, help="crop manifest JSON (default: crops-dir/manifest.json)"
+    )
+    recognize.add_argument("--template-catalog", type=Path, help="labelled template catalog JSON")
+    recognize.add_argument("--report-output", type=Path, help="destination recognition_report.json")
+    recognize.add_argument(
+        "--min-similarity", type=float, help="override the catalog rejection threshold"
+    )
+    recognize.add_argument(
+        "--min-confidence", type=float, help="override the catalog acceptance threshold"
+    )
+    recognize.add_argument(
+        "--ambiguity-margin", type=float, help="override the catalog ambiguity margin"
+    )
+    recognize.add_argument(
+        "--max-candidates", type=int, help="override the number of ranked labels retained"
+    )
+    recognize.add_argument(
+        "--overrides", type=Path, help="JSON array of manual cell-label overrides"
+    )
+    recognize.add_argument(
+        "--draft-output", type=Path, help="optional destination level_draft.json for review"
+    )
+
     interactive = commands.add_parser(
         "interactive", help="open the assisted detection and calibration window"
     )
     interactive.add_argument("--image", type=Path, help="source screenshot to open")
     interactive.add_argument("--grid-output", type=Path, help="destination grid.json")
-    interactive.add_argument(
-        "--overlay-output", type=Path, help="destination annotated_grid.png"
-    )
+    interactive.add_argument("--overlay-output", type=Path, help="destination annotated_grid.png")
     return parser
 
 
@@ -137,6 +174,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _extract(arguments, parser)
     if arguments.command == "detect":
         return _detect(arguments, parser)
+    if arguments.command == "recognize":
+        return _recognize(arguments, parser)
     if arguments.command == "interactive":
         return _interactive(arguments, parser)
     parser.error(f"unsupported command: {arguments.command}")
@@ -292,6 +331,42 @@ def _detect(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -> i
     return 0
 
 
+def _recognize(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    _validate_recognition_arguments(arguments, parser)
+    manifest_path = arguments.manifest or arguments.crops_dir / "manifest.json"
+    try:
+        manifest = load_crop_manifest(manifest_path)
+        catalog = load_template_catalog(arguments.template_catalog)
+        thresholds = _recognition_thresholds(arguments, catalog.thresholds)
+        recognizer = TemplateRecognizer(
+            catalog,
+            load_template_images(catalog, arguments.template_catalog),
+            thresholds=thresholds,
+        )
+        report = recognize_crop_directory(manifest, arguments.crops_dir, recognizer)
+        save_recognition_report(report, arguments.report_output)
+        if arguments.draft_output is not None:
+            overrides = (
+                load_recognition_overrides(arguments.overrides)
+                if arguments.overrides is not None
+                else ()
+            )
+            save_level_draft(resolve(report, overrides), arguments.draft_output)
+    except (OSError, ValidationError, ValueError) as error:
+        parser.error(str(error))
+
+    accepted = len(report.observations) - len(report.review_cells)
+    print(f"Wrote {arguments.report_output}")
+    print(f"Accepted {accepted} of {len(report.observations)} cells")
+    if arguments.draft_output is not None:
+        print(f"Wrote {arguments.draft_output}")
+    if report.review_cells:
+        cells = ", ".join(f"({cell.row}, {cell.col})" for cell in report.review_cells)
+        print(f"Manual review required for: {cells}")
+        return 2
+    return 0
+
+
 def _validate_scripted_arguments(
     arguments: argparse.Namespace, parser: argparse.ArgumentParser
 ) -> None:
@@ -330,6 +405,46 @@ def _validate_detection_arguments(
         parser.error("grid detection requires: --image")
     if not 0.0 <= arguments.min_confidence <= 1.0:
         parser.error("--min-confidence must be between 0 and 1")
+
+
+def _validate_recognition_arguments(
+    arguments: argparse.Namespace, parser: argparse.ArgumentParser
+) -> None:
+    required = ("crops_dir", "template_catalog", "report_output")
+    missing = [
+        f"--{name.replace('_', '-')}" for name in required if getattr(arguments, name) is None
+    ]
+    if missing:
+        parser.error(f"recognition requires: {', '.join(missing)}")
+    if arguments.overrides is not None and arguments.draft_output is None:
+        parser.error("--overrides requires --draft-output")
+
+
+def _recognition_thresholds(
+    arguments: argparse.Namespace, defaults: RecognitionThresholds
+) -> RecognitionThresholds:
+    return RecognitionThresholds(
+        min_similarity=(
+            defaults.min_similarity
+            if arguments.min_similarity is None
+            else arguments.min_similarity
+        ),
+        min_confidence=(
+            defaults.min_confidence
+            if arguments.min_confidence is None
+            else arguments.min_confidence
+        ),
+        ambiguity_margin=(
+            defaults.ambiguity_margin
+            if arguments.ambiguity_margin is None
+            else arguments.ambiguity_margin
+        ),
+        max_candidates=(
+            defaults.max_candidates
+            if arguments.max_candidates is None
+            else arguments.max_candidates
+        ),
+    )
 
 
 def _validate_source_image_hash(image_path: Path, expected_hash: str | None) -> None:

@@ -1,9 +1,9 @@
 # Semantic level schema (M4)
 
 `level.json` is the authoritative, image-independent input to future board
-compilation, simulation, and solving. Recognition output and crop provenance
-must stay in a separate report; a level contains no filenames, pixels, or
-confidence scores.
+compilation, simulation, and solving. Recognition output, crop provenance,
+and M8 `LevelDraft` labels must stay in a separate report; a level contains no
+filenames, pixels, or confidence scores.
 
 The current schema is version `1` and accepts only the ruleset
 `railbound-observed-v1`. Unknown fields and unknown schema versions are
@@ -11,6 +11,20 @@ rejected, so a reader cannot silently reinterpret a newer document.
 
 See [`data/example-level.json`](../data/example-level.json) for a complete,
 small manually authored document.
+
+## Use
+
+Create and validate a semantic level without a screenshot, then persist it
+with the public functions:
+
+```python
+from pathlib import Path
+
+from railbound import load_level, save_level
+
+level = load_level(Path("data/example-level.json"))
+save_level(level, Path("output/level.json"))
+```
 
 ## Top-level fields
 

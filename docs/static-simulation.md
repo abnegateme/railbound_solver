@@ -4,6 +4,19 @@ M6 replays rails; M7 adds observed World 2–4 devices. The board is immutable;
 `SimulationState` holds selected switch outputs and gate states. Coupling is
 unsupported.
 
+## Replay a placement
+
+```python
+from pathlib import Path
+
+from railbound import load_level, load_placement, simulate
+
+level = load_level(Path("data/example-level.json"))
+placement = load_placement(Path("data/example-placement.json"))
+result = simulate(level, placement)
+assert result.succeeded
+```
+
 ## Entry and movement convention
 
 An actor enters its current cell through the port opposite its travel
