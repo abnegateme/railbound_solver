@@ -16,7 +16,17 @@ from typing import Final, Literal, Self
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from railbound.geometry import CellCoord
-from railbound.level import Identifier, Level, Port, TrackPiece, TrackTransition
+from railbound.level import (
+    Button,
+    Gate,
+    Identifier,
+    Level,
+    Port,
+    Switch,
+    TrackPiece,
+    TrackTransition,
+    TunnelEndpoint,
+)
 
 PLACEMENT_SCHEMA_VERSION: Final = 1
 
@@ -115,7 +125,7 @@ class CompiledPiece:
 
 @dataclass(frozen=True, slots=True)
 class CompiledBoard:
-    """Validated static board topology ready for a later simulator.
+    """Static port graph plus immutable definitions of dynamic devices.
 
     Each port appears in at most one internal connection and at most one
     adjacency connection.  The two connection kinds stay separate so callers
@@ -131,6 +141,10 @@ class CompiledBoard:
     boundary_exits: tuple[PortNode, ...]
     unconnected_ports: tuple[PortNode, ...]
     connected_components: tuple[tuple[PortNode, ...], ...]
+    switches: tuple[Switch, ...] = ()
+    buttons: tuple[Button, ...] = ()
+    gates: tuple[Gate, ...] = ()
+    tunnel_endpoints: tuple[TunnelEndpoint, ...] = ()
 
     def piece_at(self, cell: CellCoord) -> CompiledPiece | None:
         """Return the static rail occupying ``cell``, if any."""
@@ -328,6 +342,10 @@ def compile_board(level: Level, placement: RailPlacement) -> CompiledBoard:
         boundary_exits=boundary_exits,
         unconnected_ports=unconnected_ports,
         connected_components=connected_components,
+        switches=level.switches,
+        buttons=level.buttons,
+        gates=level.gates,
+        tunnel_endpoints=level.tunnel_endpoints,
     )
 
 

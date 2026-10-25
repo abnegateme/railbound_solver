@@ -1,9 +1,9 @@
 # Static board topology (M5)
 
 M5 compiles a validated `Level` and a separate `RailPlacement` into a
-deterministic port graph. It deliberately does not move actors or implement
-switches, buttons, gates, or tunnels; those runtime mechanics begin with later
-simulation milestones.
+deterministic port graph. It does not move actors or mutate device state. The
+compiled board retains immutable switch, button, gate, and tunnel definitions
+for M7 simulation; their runtime behavior remains outside the static graph.
 
 ## Placement document
 

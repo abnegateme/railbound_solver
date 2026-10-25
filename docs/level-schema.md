@@ -25,7 +25,7 @@ small manually authored document.
 | `buildable_cells` | Cells in which a future `RailPlacement` may propose a rail. |
 | `fixed_tracks` | Immutable track pieces, specified by ports and internal transitions. |
 | `actors` | Required initial actors, with position, travel direction, type, and optional number/color. |
-| `switches`, `buttons`, `gates`, `tunnel_endpoints` | Optional device layers. They are validated as semantic data in M4; their runtime behavior begins in M7. |
+| `switches`, `buttons`, `gates`, `tunnel_endpoints` | Optional device layers with observed M7 runtime behavior. |
 | `rail_inventory` | A non-negative `total_budget`, per-`piece_kind` counts, or both. |
 | `win_condition` | Required arrivals, their optional ordering, and/or required actor couplings. |
 
@@ -51,7 +51,16 @@ duplicate cells within a single layer; fixed tracks on buildable cells;
 out-of-bounds coordinates; unknown actor IDs in a win condition; and tunnel
 pair IDs that do not have exactly two endpoints in distinct cells. A switch
 has one entry and two distinct outputs, and its initial output must be one of
-them.
+them. A switch may declare a button `channel`; it is otherwise fixed at its
+initial output. Buttons use the observed `toggle` activation behavior, and
+every button channel must control at least one same-channel gate or switch.
+
+At runtime, entering a button toggles every same-channel gate and switch after
+the tick's movements resolve. A closed gate blocks entry to its cell. Entering
+a tunnel endpoint through its `entry_port` transfers the actor through its
+pair and out of the paired endpoint's `exit_port` in that same tick. Full
+precedence and event-trace semantics are documented in
+[`static-simulation.md`](static-simulation.md).
 
 Use `load_level(path)` to parse and validate an existing document and
 `save_level(level, path)` to write readable JSON. Both are available from

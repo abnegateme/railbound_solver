@@ -50,6 +50,12 @@ class Direction(StrEnum):
     WEST = "W"
 
 
+class ButtonActivation(StrEnum):
+    """The observed state effect emitted when an actor enters a button."""
+
+    TOGGLE = "toggle"
+
+
 class LevelMetadata(_FrozenModel):
     """Optional human-readable provenance that does not affect rules."""
 
@@ -129,13 +135,20 @@ class Actor(_FrozenModel):
 
 
 class Switch(_FrozenModel):
-    """A three-port switch whose selected output is part of initial state."""
+    """A three-port junction whose selected branch may share a button channel.
+
+    A train entering ``entry_port`` leaves through ``initial_output``.  A
+    train entering either output always merges onto ``entry_port``.  A switch
+    with no ``channel`` is fixed for the duration of a replay; one with a
+    channel toggles when an actor enters a matching button.
+    """
 
     id: Identifier
     cell: CellCoord
     entry_port: Port
     output_ports: tuple[Port, Port]
     initial_output: Port
+    channel: Identifier | None = None
 
     @model_validator(mode="after")
     def valid_outputs(self) -> Self:
@@ -150,12 +163,12 @@ class Switch(_FrozenModel):
 
 
 class Button(_FrozenModel):
-    """A channelled button and its documented, but not yet simulated, effect."""
+    """A channelled device activated when an actor enters its cell."""
 
     id: Identifier
     cell: CellCoord
     channel: Identifier
-    activation_behavior: Identifier
+    activation_behavior: ButtonActivation
 
 
 class Gate(_FrozenModel):
@@ -315,6 +328,7 @@ class Level(_FrozenModel):
             raise ValueError("a level requires at least one actor")
         self._validate_win_condition_references(actor_ids)
         self._validate_tunnel_pairs()
+        self._validate_button_targets()
         return self
 
     def is_in_bounds(self, cell: CellCoord) -> bool:
@@ -370,6 +384,18 @@ class Level(_FrozenModel):
                 raise ValueError(f"tunnel pair {pair_id!r} must contain exactly two endpoints")
             if endpoints[0].cell == endpoints[1].cell:
                 raise ValueError(f"tunnel pair {pair_id!r} endpoints must occupy different cells")
+
+    def _validate_button_targets(self) -> None:
+        """Require every simulated button channel to control a device."""
+        controlled_channels = {
+            *(gate.channel for gate in self.gates),
+            *(switch.channel for switch in self.switches if switch.channel is not None),
+        }
+        unused_channels = sorted({button.channel for button in self.buttons} - controlled_channels)
+        if unused_channels:
+            raise ValueError(
+                "button channels do not control a gate or switch: " + ", ".join(unused_channels)
+            )
 
 
 def _duplicates(values: list[str] | tuple[str, ...]) -> list[str]:

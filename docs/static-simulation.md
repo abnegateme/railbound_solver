@@ -1,8 +1,9 @@
-# Deterministic static simulation (M6)
+# Deterministic simulation (M6–M7)
 
-M6 replays a `Level` and `RailPlacement` over the static port graph compiled
-by M5. It has no guessed rules for switches, buttons, gates, tunnels, or
-coupling: passing any of those mechanics raises `ValueError` before replay.
+M6 replays static rails; M7 adds the observed World 2–4 device rules without
+changing the static port convention. A `Level` and `RailPlacement` compile to
+one immutable board, while `SimulationState` keeps the selected switch outputs
+and gate states. Coupling remains unsupported and is rejected before replay.
 
 ## Entry and movement convention
 
@@ -37,18 +38,33 @@ replaying equal inputs is reproducible and previous states are safe to retain.
 forever. Reaching it produces the regular terminal failure reason
 `step_limit`, including a final failure event.
 
-## Tick order
+## Tick order and device timing
 
 Every `step()` uses one immutable input state:
 
-1. Derive a move intent for each active actor, sorted by actor ID.
-2. If any intent cannot enter a track, reaches an unconnected port, or exits
-   the board, finish atomically with the first actor-ID-ordered failure.
-3. Detect simultaneous same-cell and head-on edge-swap collisions. A collision
-   is terminal and no actor moves.
-4. Apply every accepted move together.
-5. Mark matching arrival requirements as complete, then evaluate their
+1. Derive a move intent for each active actor, sorted by actor ID, using gate
+   and switch values from the beginning of the tick.
+2. A switch routes an actor from its `entry_port` to its selected output;
+   either output may merge back into the entry port. A tunnel transfers an
+   actor from its entered endpoint to the paired endpoint's `exit_port` in the
+   same tick.
+3. If an intent cannot enter a track, is blocked by a closed gate, reaches an
+   unconnected port, or exits the board, finish atomically with the first
+   actor-ID-ordered failure.
+4. Detect simultaneous same-cell, head-on edge-swap, and shared-tunnel
+   collisions. A collision is terminal and no button effects occur.
+5. Apply every accepted move together. Each actor entering a button emits a
+   press event; press events are sorted by actor ID, then button ID.
+6. Each press toggles every same-channel gate and switch in global device-ID
+   order. Multiple presses on a channel therefore toggle its targets once per
+   press and can leave them unchanged after an even number of presses.
+7. Mark matching arrival requirements as complete, then evaluate their
    optional relative order and emit success if all are met.
+
+Consequently, a button cannot make a closed gate passable in the same tick;
+its state change becomes visible to movement in the next tick. Buttons have
+the observed `toggle` behavior. A switch with no `channel` remains fixed at
+its `initial_output`.
 
 An actor that meets an arrival requirement becomes `arrived` and no longer
 moves or occupies a collision destination. This lets independently arriving
@@ -65,10 +81,16 @@ target entry; failure events carry one of these `FailureReason` values:
   port.
 - `dead_end`: its selected exit has no matching in-bounds neighbour port.
 - `boundary_exit`: its selected exit leaves the board.
+- `gate_closed`: its selected destination is blocked by a closed gate.
 - `collision`: simultaneous intents share a target cell or swap an edge.
 - `arrival_order`: a newly completed arrival contradicts `arrival_order`.
 - `step_limit`: the configured replay bound was exhausted.
 
-This is a deliberately small trace model. M7 will extend it with dynamic
-device state, phases, and causal links without changing the static port
-semantics above.
+Each event also records a deterministic `phase`, any `device_ids`, optional
+`before_value`/`after_value`, and `causal_event_ids`. A move causes a tunnel
+transit or button press; a button press causes each resulting gate or switch
+state change. These links permit an explanation layer to trace every dynamic
+state update back to the movement that caused it.
+
+A shared tunnel produces the existing `collision` reason and identifies both
+tunnel endpoints in `device_ids`.

@@ -157,6 +157,54 @@ A cell-only graph loses important information for crossings, entry direction, an
 
 A compiled NetworkX graph may be useful for validation, reachability, and solver heuristics, but it should not replace the explicit transition rules used by simulation.
 
+### Scaling mechanics beyond the static graph
+
+The port graph is the stable topology layer, not a universal representation of
+all game rules. It scales naturally to new rail shapes and static topology,
+but a button, station, semaphore, passenger, decoy, or other future object
+may also require state, timing, or an interaction with another object.
+
+Treat every supported mechanic as four explicit additions:
+
+1. A validated semantic definition in `Level`, independent of pixels.
+2. Immutable compiled data attached to the board when it affects topology or
+   location-based lookup.
+3. A typed runtime-state field plus deterministic transition/effect function
+   when it can change during replay.
+4. Structured events, rule-focused microboards, and documented tick
+   precedence for every externally visible effect.
+
+The simulator should retain one common transition boundary:
+
+```text
+next_state, events = step(state, compiled_board)
+```
+
+Before adding the next qualitatively different dynamic mechanic after M7,
+extract device-specific code behind a common mechanics interface or registry.
+It must expose topology/entry handling, post-movement effects, state
+validation, and deterministic event generation without making pixels or
+recognition data visible to the simulator. This prevents `simulation.py` from
+becoming a growing collection of unrelated conditional branches while keeping
+observed rules explicit.
+
+The eventual solver searches a state space layered over the port graph, not
+only graph paths. A runtime search node must be able to include at least:
+
+```text
+(actor positions and travel directions,
+ dynamic device states,
+ goal/progress state,
+ tick or equivalent timing state)
+```
+
+Rail placement remains a separate candidate design variable. The simulator is
+the authority for edges in this runtime state space: a solver may use static
+graph reachability for pruning, but must replay every proposed solution using
+the same `step()` semantics. Add inventory, consist/coupling, waiting, or
+other mechanic-specific state to the node only when an observed rule requires
+it.
+
 ### Simulation and events
 
 A simulation state will eventually include:
@@ -424,13 +472,18 @@ Recognition approach order:
 
 **Inputs:** M4–M7; recognition is optional because levels can be authored manually.
 
-**Deliverables:** Candidate placement generator, deterministic search, solver result, trace, and search statistics.
+**Deliverables:** Candidate placement generator, deterministic search over
+placement candidates and simulator-reachable runtime states, solver result,
+trace, and search statistics.
 
 **Proposed interfaces:** `solve(level, limits) -> SolverResult`, containing placement, simulation result, event trace, and statistics.
 
 **Dependencies:** Standard library; NetworkX may support reachability heuristics.
 
-**Tests:** Synthetic puzzles with zero, one, and multiple solutions; unsatisfiable puzzles; budget limits; deterministic tie-breaking; every returned solution replayed by the simulator.
+**Tests:** Synthetic puzzles with zero, one, and multiple solutions;
+unsatisfiable puzzles; budget limits; deterministic tie-breaking; dynamic-state
+revisits do not conflate distinct switch/gate/progress configurations; every
+returned solution replayed by the simulator.
 
 **Acceptance criteria:** The solver resolves a small agreed puzzle set within explicit limits, and every reported solution independently simulates to success.
 
