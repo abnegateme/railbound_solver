@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -14,6 +15,7 @@ from PySide6.QtWidgets import QApplication
 
 from railbound.geometry import GridGeometry, PixelPoint
 from railbound.gui import CalibrationWindow
+from railbound.placement_io import load_placement
 
 
 def _lattice_image() -> np.ndarray:
@@ -67,8 +69,31 @@ def test_gui_extracts_calibrated_cells_without_writing_files() -> None:
     assert len(window.extracted_crops) == 4
     assert window._contact_sheet is not None
     assert window._show_crops_button.isEnabled()
+    assert window._recognize_button.isEnabled()
     assert "No files were written" in window._crop_summary.text()
 
     if window._crop_preview is not None:
         window._crop_preview.close()
+    window.close()
+
+
+def test_primary_gui_replays_and_saves_a_verified_placement(tmp_path: Path) -> None:
+    application = QApplication.instance() or QApplication([])
+    repository_root = Path(__file__).parents[1]
+    level_path = repository_root / "data" / "example-level.json"
+    placement_path = tmp_path / "solution.json"
+    window = CalibrationWindow()
+    window._load_level_from_path(level_path)
+
+    window._solve_level()
+
+    assert application is not None
+    assert window.solver_result is not None
+    assert window.solver_result.solved
+    assert window._save_solution_button.isEnabled()
+    assert "Found a verified solution" in window._solver_status.text()
+
+    window._save_solution_to_path(placement_path)
+
+    assert load_placement(placement_path).level_id == "example-straight-arrival"
     window.close()

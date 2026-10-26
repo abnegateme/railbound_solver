@@ -1,4 +1,4 @@
-"""Native Qt interface for assisted screenshot grid calibration."""
+"""Native Qt interface for parsing screenshots and solving semantic levels."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 import cv2
+from pydantic import TypeAdapter
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QColor, QImage, QMouseEvent, QPainter, QPixmap, QWheelEvent
 from PySide6.QtWidgets import (
@@ -21,8 +22,11 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSpinBox,
+    QTabWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
@@ -43,7 +47,22 @@ from railbound.detection import (
 from railbound.extraction import CellCrop, CellExtractor, CropSpec, render_crop_contact_sheet
 from railbound.geometry import CellCoord, GridCalibrationPoint, GridGeometry, PixelPoint
 from railbound.grid_io import save_grid
+from railbound.level import Level
+from railbound.level_io import save_level
+from railbound.placement_io import save_placement
+from railbound.recognition import (
+    LevelDraft,
+    RecognitionOverride,
+    RecognitionReport,
+    RecognitionSource,
+    RecognitionStatus,
+    TemplateRecognizer,
+    resolve,
+)
+from railbound.recognition_io import load_template_catalog, load_template_images
 from railbound.rendering import ColorImage, render_grid_overlay
+from railbound.simulation import SimulationEvent
+from railbound.solver import SolverLimits, SolverResult, SolverStatus, solve
 
 _POINT_COLORS = ((255, 0, 255), (0, 220, 0), (0, 0, 255), (0, 165, 255))
 _REFERENCE_POINT_COLOR = (255, 255, 0)
@@ -53,6 +72,7 @@ _POINT_LABELS = (
     "3. Center of the cell immediately below it (1, 0)",
     "4. Center of the bottom-right cell",
 )
+_OVERRIDES_ADAPTER = TypeAdapter(tuple[RecognitionOverride, ...])
 
 
 class CalibrationCanvas(QGraphicsView):
@@ -118,7 +138,7 @@ class CropPreviewWindow(QMainWindow):
 
 
 class CalibrationWindow(QMainWindow):
-    """Window for calibrating a grid and extracting its cells in memory."""
+    """One interactive workflow from screenshot parsing through baseline solving."""
 
     def __init__(
         self,
@@ -144,8 +164,14 @@ class CalibrationWindow(QMainWindow):
         self._automatic_detection = automatic_detection
         self._detection_candidates: list[CalibrationCandidate] = []
         self._detect_button: QPushButton | None = None
+        self._recognition_report: RecognitionReport | None = None
+        self._level_draft: LevelDraft | None = None
+        self._level: Level | None = None
+        self._level_path: Path | None = None
+        self._solver_result: SolverResult | None = None
+        self._placement_output: Path | None = None
 
-        self.setWindowTitle("Railbound Solver — Calibrate and extract")
+        self.setWindowTitle("Railbound Solver — Parse, review, and solve")
         self.resize(1240, 820)
         self._canvas = CalibrationCanvas()
         self._canvas.point_selected.connect(self._select_point)
@@ -162,6 +188,7 @@ class CalibrationWindow(QMainWindow):
         self._status = QLabel()
         self._status.setWordWrap(True)
         self._build_ui()
+        self._update_semantic_controls()
         if image_path is not None:
             self.load_image(image_path)
         else:
@@ -177,9 +204,9 @@ class CalibrationWindow(QMainWindow):
         toolbar.addAction(fit_action)
         self.addToolBar(toolbar)
 
-        controls = QWidget()
-        controls.setMinimumWidth(300)
-        layout = QVBoxLayout(controls)
+        calibration_controls = QWidget()
+        calibration_controls.setMinimumWidth(300)
+        layout = QVBoxLayout(calibration_controls)
         layout.addWidget(QLabel("Click the marked cell centers in order."))
         layout.addWidget(self._instruction)
         form = QFormLayout()
@@ -233,9 +260,379 @@ class CalibrationWindow(QMainWindow):
         content = QWidget()
         content_layout = QHBoxLayout(content)
         content_layout.addWidget(self._canvas, stretch=1)
-        content_layout.addWidget(controls)
+        tabs = QTabWidget()
+        tabs.setMinimumWidth(360)
+        tabs.addTab(calibration_controls, "Grid and crops")
+        tabs.addTab(self._build_review_and_solver_tab(), "Review and solve")
+        content_layout.addWidget(tabs)
         self.setCentralWidget(content)
         self._update_extraction_controls()
+
+    def _build_review_and_solver_tab(self) -> QScrollArea:
+        """Build the semantic review and solver controls in the main session."""
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.addWidget(QLabel("Recognition review"))
+        self._recognize_button = QPushButton("Recognize extracted cells…")
+        self._recognize_button.clicked.connect(self._recognize_crops)
+        self._recognition_summary = QLabel()
+        self._recognition_summary.setWordWrap(True)
+        self._recognition_view = QPlainTextEdit()
+        self._recognition_view.setReadOnly(True)
+        self._recognition_view.setMinimumHeight(130)
+        self._overrides_editor = QPlainTextEdit("[]")
+        self._overrides_editor.setPlaceholderText(
+            "Optional JSON array of RecognitionOverride objects, for example:\n"
+            '[{"cell": {"row": 0, "col": 1}, "label": "track.curve"}]'
+        )
+        self._apply_overrides_button = QPushButton("Apply recognition overrides")
+        self._apply_overrides_button.clicked.connect(self._apply_recognition_overrides)
+        layout.addWidget(self._recognize_button)
+        layout.addWidget(self._recognition_summary)
+        layout.addWidget(self._recognition_view)
+        layout.addWidget(QLabel("Recognition overrides (JSON)"))
+        layout.addWidget(self._overrides_editor)
+        layout.addWidget(self._apply_overrides_button)
+
+        layout.addWidget(QLabel("Authoritative semantic level"))
+        self._load_level_button = QPushButton("Open level.json…")
+        self._load_level_button.clicked.connect(self._open_level_dialog)
+        self._validate_level_button = QPushButton("Validate semantic level")
+        self._validate_level_button.clicked.connect(self._validate_level_editor)
+        self._save_level_button = QPushButton("Save level.json…")
+        self._save_level_button.clicked.connect(self._save_level_editor)
+        self._level_editor = QPlainTextEdit()
+        self._level_editor.setPlaceholderText(
+            "Open or paste the complete authoritative level.json here. Recognition labels are "
+            "review evidence; confirm their semantic mapping, inventory, actors, and goals here."
+        )
+        self._level_editor.setMinimumHeight(220)
+        self._level_editor.textChanged.connect(self._level_editor_changed)
+        self._semantic_status = QLabel()
+        self._semantic_status.setWordWrap(True)
+        layout.addWidget(self._load_level_button)
+        layout.addWidget(self._validate_level_button)
+        layout.addWidget(self._save_level_button)
+        layout.addWidget(self._level_editor)
+        layout.addWidget(self._semantic_status)
+
+        layout.addWidget(QLabel("Baseline solver"))
+        self._max_placements = QSpinBox()
+        self._max_placements.setRange(0, 10_000_000)
+        self._max_placements.setValue(10_000)
+        self._max_ticks = QSpinBox()
+        self._max_ticks.setRange(1, 10_000_000)
+        self._max_ticks.setValue(10_000)
+        self._limit_rails = QCheckBox("Limit candidate rail count")
+        self._max_rails = QSpinBox()
+        self._max_rails.setRange(0, 10_000)
+        self._max_rails.setEnabled(False)
+        self._limit_rails.toggled.connect(self._max_rails.setEnabled)
+        solver_form = QFormLayout()
+        solver_form.addRow("Maximum placements", self._max_placements)
+        solver_form.addRow("Maximum ticks per placement", self._max_ticks)
+        solver_form.addRow("", self._limit_rails)
+        solver_form.addRow("Maximum rails", self._max_rails)
+        self._solve_button = QPushButton("Solve validated level")
+        self._solve_button.clicked.connect(self._solve_level)
+        self._save_solution_button = QPushButton("Save verified placement…")
+        self._save_solution_button.setEnabled(False)
+        self._save_solution_button.clicked.connect(self._save_solution)
+        self._solver_status = QLabel()
+        self._solver_status.setWordWrap(True)
+        self._solver_trace = QPlainTextEdit()
+        self._solver_trace.setReadOnly(True)
+        self._solver_trace.setMinimumHeight(220)
+        layout.addLayout(solver_form)
+        layout.addWidget(self._solve_button)
+        layout.addWidget(self._save_solution_button)
+        layout.addWidget(self._solver_status)
+        layout.addWidget(self._solver_trace)
+        layout.addStretch()
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(content)
+        return scroll
+
+    @property
+    def solver_result(self) -> SolverResult | None:
+        """Return the latest result produced inside this interactive session."""
+        return self._solver_result
+
+    def _recognize_crops(self) -> None:
+        """Recognize the current in-memory crops without writing intermediate files."""
+        if self._image is None or self._grid is None or self._crop_spec is None or not self._crops:
+            self._show_error("Extract calibrated cells before starting recognition.")
+            return
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open template catalog",
+            str(self._image_path.parent if self._image_path else Path.cwd()),
+            "Template catalog JSON (*.json)",
+        )
+        if not selected:
+            return
+        catalog_path = Path(selected)
+        try:
+            catalog = load_template_catalog(catalog_path)
+            recognizer = TemplateRecognizer(catalog, load_template_images(catalog, catalog_path))
+            observations = tuple(recognizer.recognize(crop) for crop in self._crops)
+            source = RecognitionSource(
+                image_sha256=self._image_hash,
+                image_width=self._image.shape[1],
+                image_height=self._image.shape[0],
+                rows=self._grid.rows,
+                cols=self._grid.cols,
+                crop_spec=self._crop_spec,
+            )
+            self._recognition_report = RecognitionReport(
+                source=source,
+                template_catalog=catalog,
+                template_fingerprint=recognizer.fingerprint,
+                thresholds=recognizer.thresholds,
+                observations=observations,
+                review_cells=tuple(
+                    observation.cell
+                    for observation in observations
+                    if observation.status is not RecognitionStatus.ACCEPTED
+                ),
+            )
+        except (OSError, ValueError) as error:
+            self._show_error(f"Could not recognize extracted cells: {error}")
+            return
+
+        self._overrides_editor.setPlainText("[]")
+        self._apply_recognition_overrides()
+
+    def _apply_recognition_overrides(self) -> None:
+        """Apply visible manual recognition choices to the current report."""
+        if self._recognition_report is None:
+            self._show_error("Run recognition before applying overrides.")
+            return
+        try:
+            overrides = _OVERRIDES_ADAPTER.validate_json(
+                self._overrides_editor.toPlainText().strip() or "[]"
+            )
+            self._level_draft = resolve(self._recognition_report, overrides)
+        except ValueError as error:
+            self._show_error(f"Could not apply recognition overrides: {error}")
+            return
+
+        self._render_recognition_review(self._recognition_report, self._level_draft)
+        self._update_semantic_controls()
+
+    def _render_recognition_review(self, report: RecognitionReport, draft: LevelDraft) -> None:
+        """Show candidates, confidence, and unresolved cells in row-major order."""
+        lines: list[str] = []
+        for observation in report.observations:
+            candidate = observation.candidates[0].label if observation.candidates else "-"
+            lines.append(
+                f"({observation.cell.row}, {observation.cell.col}) "
+                f"{observation.status.value}: {candidate} "
+                f"({observation.confidence:.2f})"
+            )
+        if draft.unresolved_cells:
+            unresolved = ", ".join(f"({cell.row}, {cell.col})" for cell in draft.unresolved_cells)
+            self._recognition_summary.setText(
+                f"{len(draft.unresolved_cells)} cell(s) still require a manual label: {unresolved}"
+            )
+        else:
+            self._recognition_summary.setText(
+                "Every cell has a reviewed label. Complete the semantic level below before solving."
+            )
+        self._recognition_view.setPlainText("\n".join(lines))
+
+    def _open_level_dialog(self) -> None:
+        """Load an authoritative semantic level into the in-window editor."""
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open semantic level",
+            str(self._level_path.parent if self._level_path else Path.cwd()),
+            "Level JSON (*.json)",
+        )
+        if selected:
+            self._load_level_from_path(Path(selected))
+
+    def _load_level_from_path(self, path: Path) -> None:
+        """Read, validate, and display a semantic level without changing its data."""
+        try:
+            raw_level = path.read_text(encoding="utf-8")
+            level = Level.model_validate_json(raw_level)
+            self._validate_level_grid_dimensions(level)
+        except (OSError, ValueError) as error:
+            self._show_error(f"Could not load semantic level: {error}")
+            return
+        self._level_editor.setPlainText(raw_level)
+        self._set_validated_level(level, path)
+
+    def _validate_level_editor(self) -> Level | None:
+        """Validate the editable semantic document before simulation or solving."""
+        try:
+            level = Level.model_validate_json(self._level_editor.toPlainText())
+            self._validate_level_grid_dimensions(level)
+        except ValueError as error:
+            self._show_error(f"Semantic level is invalid: {error}")
+            return None
+        self._set_validated_level(level, self._level_path)
+        return level
+
+    def _level_editor_changed(self) -> None:
+        """Invalidate results whenever the authoritative document changes."""
+        self._level = None
+        self._solver_result = None
+        self._save_solution_button.setEnabled(False)
+        self._solver_trace.clear()
+        self._semantic_status.setText("Semantic level changed; validate it before solving.")
+        self._solver_status.clear()
+        self._update_semantic_controls()
+
+    def _set_validated_level(self, level: Level, path: Path | None) -> None:
+        """Adopt one validated level and invalidate any prior solver result."""
+        self._level = level
+        self._level_path = path
+        self._solver_result = None
+        self._save_solution_button.setEnabled(False)
+        self._solver_trace.clear()
+        self._semantic_status.setText(
+            f"Validated level {level.id!r}: {level.rows} rows × {level.cols} columns."
+        )
+        self._solver_status.setText("Level is ready for deterministic replay and solving.")
+        self._update_semantic_controls()
+
+    def _validate_level_grid_dimensions(self, level: Level) -> None:
+        """Keep the semantic document aligned with the calibrated screenshot grid."""
+        if self._grid is None:
+            return
+        if (level.rows, level.cols) != (self._grid.rows, self._grid.cols):
+            raise ValueError(
+                "semantic level dimensions "
+                f"({level.rows}, {level.cols}) do not match calibrated grid "
+                f"({self._grid.rows}, {self._grid.cols})"
+            )
+
+    def _save_level_editor(self) -> None:
+        """Persist the currently edited, validated semantic level from this window."""
+        level = self._validate_level_editor()
+        if level is None:
+            return
+        suggested = self._level_path or Path("level.json")
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save semantic level",
+            str(suggested),
+            "Level JSON (*.json)",
+        )
+        if not selected:
+            return
+        output_path = Path(selected).with_suffix(".json")
+        try:
+            save_level(level, output_path)
+        except OSError as error:
+            self._show_error(f"Could not save semantic level: {error}")
+            return
+        self._set_validated_level(level, output_path)
+        self._semantic_status.setText(f"Saved and validated semantic level to {output_path}")
+
+    def _solve_level(self) -> None:
+        """Search the in-window semantic level and render its verified replay."""
+        level = self._validate_level_editor()
+        if level is None:
+            return
+        max_rails = self._max_rails.value() if self._limit_rails.isChecked() else None
+        try:
+            self._solver_result = solve(
+                level,
+                SolverLimits(
+                    max_placements=self._max_placements.value(),
+                    max_rails=max_rails,
+                    max_ticks=self._max_ticks.value(),
+                ),
+            )
+        except ValueError as error:
+            self._show_error(f"Could not solve semantic level: {error}")
+            return
+
+        self._save_solution_button.setEnabled(self._solver_result.solved)
+        self._render_solver_result(self._solver_result)
+
+    def _render_solver_result(self, result: SolverResult) -> None:
+        """Render placement and trace from immutable simulator-verified output."""
+        stats = result.statistics
+        lines = [
+            f"Status: {result.status.value}",
+            f"Placements considered: {stats.placements_considered}",
+            f"Runtime states visited: {stats.runtime_states_visited}",
+            f"Events emitted: {stats.events_emitted}",
+        ]
+        if result.solved and result.placement is not None:
+            self._solver_status.setText(
+                f"Found a verified solution with {len(result.placement.rails)} rail(s)."
+            )
+            lines.extend(("", "Placement:"))
+            lines.extend(
+                f"  ({rail.cell.row}, {rail.cell.col}) "
+                f"{rail.piece_kind.value} {rail.orientation.value}"
+                for rail in result.placement.rails
+            )
+        elif result.status is SolverStatus.LIMIT_REACHED:
+            self._solver_status.setText("No solution found before the requested search limit.")
+        else:
+            self._solver_status.setText("No valid placement exists within the level's inventory.")
+
+        if result.trace:
+            lines.extend(("", "Trace:"))
+            lines.extend(_event_summary(event) for event in result.trace)
+        self._solver_trace.setPlainText("\n".join(lines))
+
+    def _save_solution(self) -> None:
+        """Save the current solution only after its replay reached success."""
+        if (
+            self._solver_result is None
+            or not self._solver_result.solved
+            or self._solver_result.placement is None
+        ):
+            self._show_error("Solve the level successfully before saving a placement.")
+            return
+        suggested = self._placement_output or (
+            self._level_path.with_name(f"{self._level.id}-solution.json")
+            if self._level_path is not None and self._level is not None
+            else Path("solution.json")
+        )
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save verified rail placement",
+            str(suggested),
+            "Placement JSON (*.json)",
+        )
+        if not selected:
+            return
+        output_path = Path(selected).with_suffix(".json")
+        self._save_solution_to_path(output_path)
+
+    def _save_solution_to_path(self, output_path: Path) -> None:
+        """Persist the current verified solution to an explicit destination."""
+        if self._solver_result is None or self._solver_result.placement is None:
+            self._show_error("Solve the level successfully before saving a placement.")
+            return
+        try:
+            save_placement(self._solver_result.placement, output_path)
+        except OSError as error:
+            self._show_error(f"Could not save verified placement: {error}")
+            return
+        self._placement_output = output_path
+        self._solver_status.setText(f"Saved verified placement to {output_path}")
+
+    def _update_semantic_controls(self) -> None:
+        """Enable each in-window stage only when its in-memory input exists."""
+        has_crops = bool(self._crops)
+        has_report = self._recognition_report is not None
+        has_level_text = bool(self._level_editor.toPlainText().strip())
+        self._recognize_button.setEnabled(has_crops)
+        self._apply_overrides_button.setEnabled(has_report)
+        self._validate_level_button.setEnabled(has_level_text)
+        self._save_level_button.setEnabled(has_level_text)
+        self._solve_button.setEnabled(has_level_text)
 
     def load_image(self, path: Path) -> None:
         image = cast(ColorImage | None, cv2.imread(str(path), cv2.IMREAD_COLOR))
@@ -471,7 +868,7 @@ class CalibrationWindow(QMainWindow):
         else:
             self._instruction.setText(
                 "Grid is fitted. Click any labeled cell center to add a reference point, "
-                "extract cells in memory, or save it."
+                "extract cells in memory, then review and solve in this window."
             )
 
     def _control_points(self) -> tuple[GridCalibrationPoint, ...]:
@@ -583,8 +980,17 @@ class CalibrationWindow(QMainWindow):
         self._crops = []
         self._crop_spec = None
         self._contact_sheet = None
+        self._recognition_report = None
+        self._level_draft = None
+        self._solver_result = None
+        self._recognition_summary.clear()
+        self._recognition_view.clear()
+        self._overrides_editor.setPlainText("[]")
+        self._save_solution_button.setEnabled(False)
+        self._solver_trace.clear()
         if self._crop_preview is not None:
             self._crop_preview.hide()
+        self._update_semantic_controls()
 
     def _extract_cells(self) -> None:
         if self._image is None or self._grid is None:
@@ -617,6 +1023,7 @@ class CalibrationWindow(QMainWindow):
         )
         self._status.setText("Grid calibrated and cells extracted in memory.")
         self._update_extraction_controls()
+        self._update_semantic_controls()
         self._show_crop_preview()
 
     def _show_crop_preview(self) -> None:
@@ -649,7 +1056,7 @@ class CalibrationWindow(QMainWindow):
 
     def _show_error(self, message: str) -> None:
         self._status.setText(message)
-        QMessageBox.warning(self, "Railbound calibration", message)
+        QMessageBox.warning(self, "Railbound Solver", message)
 
 
 def run_calibration_gui(
@@ -659,7 +1066,7 @@ def run_calibration_gui(
     overlay_output: Path | None,
     automatic_detection: bool = False,
 ) -> int:
-    """Open the native calibration window and return Qt's process exit code."""
+    """Open the primary native parse, review, and solve window."""
     application = QApplication.instance()
     if application is None:
         application = QApplication([])
@@ -680,6 +1087,17 @@ def run_calibration_gui(
     )
     window.show()
     return 0
+
+
+def _event_summary(event: SimulationEvent) -> str:
+    """Render one structured replay event as compact inspectable text."""
+    actors = ", ".join(event.actor_ids) if event.actor_ids else "-"
+    cell = event.target_cell or event.source_cell
+    location = "" if cell is None else f" at ({cell.row}, {cell.col})"
+    reason = "" if event.reason is None else f" [{event.reason.value}]"
+    return (
+        f"{event.sequence:04d}  tick {event.tick}  {event.kind.value}  {actors}{location}{reason}"
+    )
 
 
 def _bgr_to_qimage(image: ColorImage) -> QImage:

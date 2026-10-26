@@ -767,9 +767,11 @@ def _apply_button_effects(
         )
         for target_id in target_ids:
             if target_id in gates_by_id:
-                before = gate_statuses[target_id]
-                after = GateStatus.CLOSED if before is GateStatus.OPEN else GateStatus.OPEN
-                gate_statuses[target_id] = after
+                gate_before = gate_statuses[target_id]
+                gate_after = (
+                    GateStatus.CLOSED if gate_before is GateStatus.OPEN else GateStatus.OPEN
+                )
+                gate_statuses[target_id] = gate_after
                 events.append(
                     _event(
                         state,
@@ -779,17 +781,17 @@ def _apply_button_effects(
                         phase=EventPhase.STATE_CHANGE,
                         target_cell=gates_by_id[target_id].cell,
                         device_ids=(target_id,),
-                        before_value=before.value,
-                        after_value=after.value,
+                        before_value=gate_before.value,
+                        after_value=gate_after.value,
                         causal_event_ids=(button_event.sequence,),
                     )
                 )
                 continue
             switch = switches_by_id[target_id]
-            before = switch_outputs[target_id]
+            switch_before = switch_outputs[target_id]
             first, second = switch.output_ports
-            after = second if before == first else first
-            switch_outputs[target_id] = after
+            switch_after = second if switch_before == first else first
+            switch_outputs[target_id] = switch_after
             events.append(
                 _event(
                     state,
@@ -799,8 +801,8 @@ def _apply_button_effects(
                     phase=EventPhase.STATE_CHANGE,
                     target_cell=switch.cell,
                     device_ids=(target_id,),
-                    before_value=before.value,
-                    after_value=after.value,
+                    before_value=switch_before.value,
+                    after_value=switch_after.value,
                     causal_event_ids=(button_event.sequence,),
                 )
             )

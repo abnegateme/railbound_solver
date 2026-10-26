@@ -10,6 +10,7 @@ from railbound.crop_io import CropManifest, CropRecord, save_crop_manifest
 from railbound.extraction import CropSpec
 from railbound.geometry import CellCoord, GridGeometry, PixelPoint
 from railbound.grid_io import load_grid, save_grid
+from railbound.placement_io import load_placement
 from railbound.recognition import TemplateCatalog, TemplateDefinition
 from railbound.recognition_io import (
     load_level_draft,
@@ -202,3 +203,45 @@ def test_recognize_command_writes_report_and_review_draft(tmp_path: Path) -> Non
     ]
     assert draft.unresolved_cells == (CellCoord(row=0, col=1),)
     assert not draft.is_complete
+
+
+def test_solve_command_writes_a_simulator_verified_placement(tmp_path: Path) -> None:
+    repository_root = Path(__file__).parents[1]
+    placement_path = tmp_path / "solutions" / "example-placement.json"
+
+    result = main(
+        [
+            "solve",
+            "--level",
+            str(repository_root / "data" / "example-level.json"),
+            "--placement-output",
+            str(placement_path),
+            "--max-placements",
+            "10",
+        ]
+    )
+
+    assert result == 0
+    assert load_placement(placement_path).level_id == "example-straight-arrival"
+
+
+def test_solve_command_returns_no_solution_status_when_its_search_limit_is_reached(
+    tmp_path: Path,
+) -> None:
+    repository_root = Path(__file__).parents[1]
+    placement_path = tmp_path / "solution.json"
+
+    result = main(
+        [
+            "solve",
+            "--level",
+            str(repository_root / "data" / "example-level.json"),
+            "--placement-output",
+            str(placement_path),
+            "--max-placements",
+            "1",
+        ]
+    )
+
+    assert result == 2
+    assert not placement_path.exists()

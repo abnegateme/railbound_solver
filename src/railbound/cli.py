@@ -1,4 +1,4 @@
-"""Commands for manual and interactive Railbound screenshot calibration."""
+"""Commands for Railbound calibration, recognition, and solving."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from railbound.detection import GridDetectionHints, GridDetector, render_detecti
 from railbound.extraction import CellExtractor, CropSpec, render_crop_contact_sheet
 from railbound.geometry import PixelPoint
 from railbound.grid_io import load_grid, save_grid
+from railbound.level_io import load_level
+from railbound.placement_io import save_placement
 from railbound.recognition import RecognitionThresholds, TemplateRecognizer, resolve
 from railbound.recognition_io import (
     load_recognition_overrides,
@@ -26,17 +28,18 @@ from railbound.recognition_io import (
     save_recognition_report,
 )
 from railbound.rendering import ColorImage, render_grid_overlay
+from railbound.solver import SolverLimits, SolverStatus, solve
 
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the command-line parser without reading input or changing state."""
     parser = argparse.ArgumentParser(
-        description="Calibrate, extract, and recognize Railbound boards."
+        description="Calibrate, extract, recognize, and solve Railbound boards."
     )
     commands = parser.add_subparsers(dest="command", required=True)
     calibrate = commands.add_parser("calibrate", help="calibrate a grid from a screenshot")
     calibrate.add_argument(
-        "--interactive", action="store_true", help="open the native calibration window"
+        "--interactive", action="store_true", help="open the primary interactive workflow"
     )
     calibrate.add_argument("--image", type=Path, help="source screenshot")
     calibrate.add_argument("--rows", type=int, help="number of grid rows")
@@ -153,8 +156,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--draft-output", type=Path, help="optional destination level_draft.json for review"
     )
 
+    solve_command = commands.add_parser(
+        "solve", help="find and write a simulator-verified rail placement"
+    )
+    solve_command.add_argument("--level", type=Path, help="authoritative semantic level.json")
+    solve_command.add_argument(
+        "--placement-output", type=Path, help="destination solution placement JSON"
+    )
+    solve_command.add_argument(
+        "--max-placements",
+        type=int,
+        default=10_000,
+        help="maximum placement candidates to replay (default: 10000)",
+    )
+    solve_command.add_argument(
+        "--max-rails", type=int, help="maximum rails in a candidate placement"
+    )
+    solve_command.add_argument(
+        "--max-ticks",
+        type=int,
+        default=10_000,
+        help="maximum simulation ticks per candidate (default: 10000)",
+    )
+
     interactive = commands.add_parser(
-        "interactive", help="open the assisted detection and calibration window"
+        "interactive", help="open the primary screenshot parsing and solver window"
     )
     interactive.add_argument("--image", type=Path, help="source screenshot to open")
     interactive.add_argument("--grid-output", type=Path, help="destination grid.json")
@@ -163,7 +189,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run a requested non-interactive command and return a process exit code."""
+    """Run a requested command and return its process exit code."""
     parser = build_parser()
     arguments = parser.parse_args(argv)
     if arguments.command == "calibrate":
@@ -176,6 +202,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _detect(arguments, parser)
     if arguments.command == "recognize":
         return _recognize(arguments, parser)
+    if arguments.command == "solve":
+        return _solve(arguments, parser)
     if arguments.command == "interactive":
         return _interactive(arguments, parser)
     parser.error(f"unsupported command: {arguments.command}")
@@ -367,6 +395,42 @@ def _recognize(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -
     return 0
 
 
+def _solve(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
+    """Search a semantic level and persist its first verified placement."""
+    _validate_solver_arguments(arguments, parser)
+    try:
+        level = load_level(arguments.level)
+        result = solve(
+            level,
+            SolverLimits(
+                max_placements=arguments.max_placements,
+                max_rails=arguments.max_rails,
+                max_ticks=arguments.max_ticks,
+            ),
+        )
+    except (OSError, ValidationError, ValueError) as error:
+        parser.error(str(error))
+
+    stats = result.statistics
+    print(
+        "Searched "
+        f"{stats.placements_considered} placements, "
+        f"{stats.runtime_states_visited} runtime states, and "
+        f"{stats.events_emitted} events."
+    )
+    if result.solved:
+        if result.placement is None:
+            raise AssertionError("a solved result must include a placement")
+        save_placement(result.placement, arguments.placement_output)
+        print(f"Wrote {arguments.placement_output}")
+        return 0
+    if result.status is SolverStatus.LIMIT_REACHED:
+        print("No solution found before the requested search limit.")
+    else:
+        print("No valid placement exists within the level's inventory.")
+    return 2
+
+
 def _validate_scripted_arguments(
     arguments: argparse.Namespace, parser: argparse.ArgumentParser
 ) -> None:
@@ -418,6 +482,19 @@ def _validate_recognition_arguments(
         parser.error(f"recognition requires: {', '.join(missing)}")
     if arguments.overrides is not None and arguments.draft_output is None:
         parser.error("--overrides requires --draft-output")
+
+
+def _validate_solver_arguments(
+    arguments: argparse.Namespace,
+    parser: argparse.ArgumentParser,
+) -> None:
+    """Require solver input and output paths before loading level data."""
+    required = ("level", "placement_output")
+    missing = [
+        f"--{name.replace('_', '-')}" for name in required if getattr(arguments, name) is None
+    ]
+    if missing:
+        parser.error(f"solve requires: {', '.join(missing)}")
 
 
 def _recognition_thresholds(

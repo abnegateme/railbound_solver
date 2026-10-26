@@ -444,7 +444,9 @@ Recognition approach order:
 
 **Deliverables:** Candidate placement generator, deterministic search over
 placement candidates and simulator-reachable runtime states, solver result,
-trace, and search statistics.
+trace, and search statistics. A scripted solve command and controls in the
+primary native interactive session make the baseline available to users of
+manually authored levels.
 
 **Proposed interfaces:** `solve(level, limits) -> SolverResult`, containing placement, simulation result, event trace, and statistics.
 
@@ -501,7 +503,9 @@ The simplest useful strategy is iterative deepening depth-first search over a ca
 
 **Risks:** Clutter, unreadable labels, and brittle pixel-exact golden tests.
 
-**What we explicitly do not implement yet:** Interactive UI or video animation.
+**What we explicitly do not implement yet:** An image-overlay editor or video
+animation. M9 presents semantic placements and traces in the primary session;
+M11 adds screenshot-aligned solution rendering.
 
 ### M12 — Explanation and hint generation
 

@@ -9,12 +9,12 @@ validated :class:`railbound.level.Level` and cannot be simulated directly.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
-import json
 from pathlib import PurePosixPath
 from typing import Annotated, Final, Literal, Self, cast
 
@@ -31,6 +31,7 @@ from railbound.level import Identifier
 RECOGNITION_SCHEMA_VERSION: Final = 1
 TEMPLATE_CATALOG_SCHEMA_VERSION: Final = 1
 LEVEL_DRAFT_SCHEMA_VERSION: Final = 1
+type RotationDegrees = Literal[0, 90, 180, 270]
 
 
 class _FrozenModel(BaseModel):
@@ -67,7 +68,7 @@ class TemplateDefinition(_FrozenModel):
     id: Identifier
     label: Identifier
     image: str
-    rotations: tuple[Literal[0, 90, 180, 270], ...] = (0, 90, 180, 270)
+    rotations: tuple[RotationDegrees, ...] = (0, 90, 180, 270)
 
     @field_validator("image")
     @classmethod
@@ -123,7 +124,7 @@ class RecognitionCandidate(_FrozenModel):
     rank: Annotated[int, Field(gt=0)]
     label: Identifier
     template_id: Identifier
-    rotation_degrees: Literal[0, 90, 180, 270]
+    rotation_degrees: RotationDegrees
     similarity: Annotated[float, Field(ge=0.0, le=1.0)]
 
 
@@ -428,7 +429,7 @@ class TemplateRecognizer:
         )
 
     def _rank_candidates(self, image: BgrImage) -> tuple[RecognitionCandidate, ...]:
-        best_by_label: dict[str, tuple[float, str, int]] = {}
+        best_by_label: dict[str, tuple[float, str, RotationDegrees]] = {}
         for template in self._templates:
             for angle in template.definition.rotations:
                 similarity = _image_similarity(image, _rotate(template.image, angle))
