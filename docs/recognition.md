@@ -37,6 +37,16 @@ uses the strongest reference for that label, so visual variants do not create
 false ambiguity. The recorded rotation is clockwise from the reference image
 to the observed crop.
 
+In the primary Windows GUI, **Review and solve** can create this catalog
+without leaving the screenshot session: select an extracted crop, give it a
+label, then save the catalog. The UI generates the template ID unless a custom
+one is supplied. Saving writes the portable JSON and `references/*.png` files
+together. The initial labels are necessarily manual; the recognizer cannot
+infer the meaning of its first visual reference. Start with labels that
+describe a visible class rather than a full game rule: `terrain.empty`,
+`track.straight`, `track.curve`, `track.crossing`, `actor.train`,
+`goal.arrival`, and `device.*` are useful conventions.
+
 Matching combines normalized colour-structure correlation with a small
 mean-colour feature. A top match must exceed `min_similarity`; its gap from
 the strongest *different* label scales confidence. A low score becomes

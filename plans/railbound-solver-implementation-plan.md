@@ -413,7 +413,7 @@ Hough-first detection is likely fragile because game artwork contains many stron
 
 **Inputs:** M2 crops, M4 vocabulary, and labeled reference cells.
 
-**Deliverables:** Template/heuristic recognizers, confidence scoring, recognition report, uncertain-cell review list, and conversion to `LevelDraft`.
+**Deliverables:** Template/heuristic recognizers, confidence scoring, recognition report, uncertain-cell review list, conversion to `LevelDraft`, and primary-session controls to author portable labelled template catalogs from extracted cells.
 
 **Proposed interfaces:** `recognize(crop) -> RecognitionObservation` and `resolve(observations, overrides) -> Level`.
 

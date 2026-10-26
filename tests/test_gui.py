@@ -42,7 +42,7 @@ def test_interactive_gui_adopts_a_confident_detection_as_editable_calibration() 
     window.close()
 
 
-def test_gui_extracts_calibrated_cells_without_writing_files() -> None:
+def test_gui_extracts_authors_catalog_and_exports_portable_artifacts(tmp_path: Path) -> None:
     application = QApplication.instance() or QApplication([])
     window = CalibrationWindow()
     window._image = np.full((20, 20, 3), 120, dtype=np.uint8)
@@ -69,8 +69,33 @@ def test_gui_extracts_calibrated_cells_without_writing_files() -> None:
     assert len(window.extracted_crops) == 4
     assert window._contact_sheet is not None
     assert window._show_crops_button.isEnabled()
-    assert window._recognize_button.isEnabled()
+    assert not window._recognize_button.isEnabled()
     assert "No files were written" in window._crop_summary.text()
+
+    window._template_label_editor.setText("terrain.empty")
+    assert window._add_template_button.isEnabled()
+    window._add_template_from_crop()
+    assert window._recognize_button.isEnabled()
+    catalog_path = tmp_path / "catalog" / "catalog.json"
+    window._save_template_catalog_to_path(catalog_path)
+    window._new_template_catalog()
+    window._load_template_catalog_from_path(catalog_path)
+    window._recognize_crops()
+    report_path = tmp_path / "recognition_report.json"
+    draft_path = tmp_path / "level_draft.json"
+    export_directory = tmp_path / "crops"
+    window._save_recognition_report_to_path(report_path)
+    window._save_level_draft_to_path(draft_path)
+    window._export_crops_to_directory(export_directory)
+
+    assert (catalog_path.parent / "references" / "terrain.empty-r000-c000.png").is_file()
+    assert len(window._catalog_templates) == 1
+    assert window._recognition_report is not None
+    assert window._level_draft is not None
+    assert report_path.is_file()
+    assert draft_path.is_file()
+    assert (export_directory / "manifest.json").is_file()
+    assert (export_directory / "contact_sheet.png").is_file()
 
     if window._crop_preview is not None:
         window._crop_preview.close()
@@ -81,9 +106,15 @@ def test_primary_gui_replays_and_saves_a_verified_placement(tmp_path: Path) -> N
     application = QApplication.instance() or QApplication([])
     repository_root = Path(__file__).parents[1]
     level_path = repository_root / "data" / "example-level.json"
+    authored_placement_path = repository_root / "data" / "example-placement.json"
     placement_path = tmp_path / "solution.json"
     window = CalibrationWindow()
     window._load_level_from_path(level_path)
+    window._load_placement_from_path(authored_placement_path)
+    window._inspect_topology()
+    assert "Pieces:" in window._placement_inspection_output.toPlainText()
+    window._replay_placement()
+    assert "Status: success" in window._placement_inspection_output.toPlainText()
 
     window._solve_level()
 

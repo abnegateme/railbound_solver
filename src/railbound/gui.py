@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Literal, cast
 
 import cv2
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QColor, QImage, QMouseEvent, QPainter, QPixmap, QWheelEvent
 from PySide6.QtWidgets import (
@@ -20,6 +20,8 @@ from PySide6.QtWidgets import (
     QGraphicsView,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QListWidget,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -38,6 +40,7 @@ from railbound.calibration import (
     grid_from_three_points,
     image_sha256,
 )
+from railbound.crop_io import write_crop_set
 from railbound.detection import (
     CalibrationCandidate,
     GridDetectionHints,
@@ -49,20 +52,38 @@ from railbound.geometry import CellCoord, GridCalibrationPoint, GridGeometry, Pi
 from railbound.grid_io import save_grid
 from railbound.level import Level
 from railbound.level_io import save_level
-from railbound.placement_io import save_placement
+from railbound.placement_io import load_placement, save_placement
 from railbound.recognition import (
     LevelDraft,
     RecognitionOverride,
     RecognitionReport,
     RecognitionSource,
     RecognitionStatus,
+    RecognitionThresholds,
+    Template,
+    TemplateCatalog,
+    TemplateDefinition,
     TemplateRecognizer,
     resolve,
 )
-from railbound.recognition_io import load_template_catalog, load_template_images
+from railbound.recognition_io import (
+    load_template_catalog,
+    load_template_images,
+    save_level_draft,
+    save_recognition_overrides,
+    save_recognition_report,
+    save_template_catalog,
+)
 from railbound.rendering import ColorImage, render_grid_overlay
-from railbound.simulation import SimulationEvent
+from railbound.simulation import SimulationEvent, SimulationOptions, simulate
 from railbound.solver import SolverLimits, SolverResult, SolverStatus, solve
+from railbound.topology import (
+    CompiledBoard,
+    PortNode,
+    RailPlacement,
+    compile_board,
+    validate_placement,
+)
 
 _POINT_COLORS = ((255, 0, 255), (0, 220, 0), (0, 0, 255), (0, 165, 255))
 _REFERENCE_POINT_COLOR = (255, 255, 0)
@@ -166,10 +187,16 @@ class CalibrationWindow(QMainWindow):
         self._detect_button: QPushButton | None = None
         self._recognition_report: RecognitionReport | None = None
         self._level_draft: LevelDraft | None = None
+        self._catalog_templates: dict[str, Template] = {}
+        self._catalog_recognizer_version = "template-ncc-v1"
+        self._catalog_thresholds = RecognitionThresholds()
+        self._template_catalog_path: Path | None = None
         self._level: Level | None = None
         self._level_path: Path | None = None
+        self._placement: RailPlacement | None = None
+        self._placement_path: Path | None = None
         self._solver_result: SolverResult | None = None
-        self._placement_output: Path | None = None
+        self._solution_output_path: Path | None = None
 
         self.setWindowTitle("Railbound Solver — Parse, review, and solve")
         self.resize(1240, 820)
@@ -236,10 +263,13 @@ class CalibrationWindow(QMainWindow):
         self._extract_button.clicked.connect(self._extract_cells)
         self._show_crops_button = QPushButton("Show extracted cells")
         self._show_crops_button.clicked.connect(self._show_crop_preview)
+        self._export_crops_button = QPushButton("Export crops and manifest…")
+        self._export_crops_button.clicked.connect(self._export_crops)
         self._crop_summary = QLabel()
         self._crop_summary.setWordWrap(True)
         layout.addWidget(self._extract_button)
         layout.addWidget(self._show_crops_button)
+        layout.addWidget(self._export_crops_button)
         layout.addWidget(self._crop_summary)
         self._crop_mode.currentIndexChanged.connect(self._crop_settings_changed)
         self._crop_size.valueChanged.connect(self._crop_settings_changed)
@@ -272,9 +302,61 @@ class CalibrationWindow(QMainWindow):
         """Build the semantic review and solver controls in the main session."""
         content = QWidget()
         layout = QVBoxLayout(content)
+        layout.addWidget(QLabel("Template catalog"))
+        self._new_catalog_button = QPushButton("New template catalog")
+        self._new_catalog_button.clicked.connect(self._new_template_catalog)
+        self._open_catalog_button = QPushButton("Open template catalog…")
+        self._open_catalog_button.clicked.connect(self._open_template_catalog_dialog)
+        self._save_catalog_button = QPushButton("Save template catalog…")
+        self._save_catalog_button.clicked.connect(self._save_template_catalog_dialog)
+        self._catalog_status = QLabel("Create a catalog from extracted cells or open one.")
+        self._catalog_status.setWordWrap(True)
+        self._template_crop_selector = QComboBox()
+        self._template_id_editor = QLineEdit()
+        self._template_id_editor.setPlaceholderText(
+            "optional; generated from label and source crop"
+        )
+        self._template_label_editor = QLineEdit()
+        self._template_label_editor.setPlaceholderText(
+            "semantic candidate label, e.g. terrain.empty"
+        )
+        label_hint = QLabel(
+            "Suggested labels: terrain.empty, track.straight, track.curve, "
+            "track.crossing, actor.train, goal.arrival, device.switch, "
+            "device.button, device.gate, device.tunnel. Use one visual class per label."
+        )
+        label_hint.setWordWrap(True)
+        self._template_id_editor.textChanged.connect(self._update_semantic_controls)
+        self._template_label_editor.textChanged.connect(self._update_semantic_controls)
+        self._add_template_button = QPushButton("Add/update selected crop as template")
+        self._add_template_button.clicked.connect(self._add_template_from_crop)
+        self._remove_template_button = QPushButton("Remove selected template")
+        self._remove_template_button.clicked.connect(self._remove_selected_template)
+        self._template_list = QListWidget()
+        self._template_list.setMinimumHeight(110)
+        self._template_list.currentRowChanged.connect(self._template_selection_changed)
+        template_form = QFormLayout()
+        template_form.addRow("Source crop", self._template_crop_selector)
+        template_form.addRow("Template ID (optional)", self._template_id_editor)
+        template_form.addRow("Label", self._template_label_editor)
+        layout.addWidget(self._new_catalog_button)
+        layout.addWidget(self._open_catalog_button)
+        layout.addWidget(self._save_catalog_button)
+        layout.addWidget(self._catalog_status)
+        layout.addLayout(template_form)
+        layout.addWidget(label_hint)
+        layout.addWidget(self._add_template_button)
+        layout.addWidget(self._remove_template_button)
+        layout.addWidget(self._template_list)
+
         layout.addWidget(QLabel("Recognition review"))
-        self._recognize_button = QPushButton("Recognize extracted cells…")
+        self._recognize_button = QPushButton("Recognize extracted cells with catalog")
         self._recognize_button.clicked.connect(self._recognize_crops)
+        catalog_hint = QLabel(
+            "Create a catalog from selected crops or open one with a top-level `templates` list; "
+            "grid.json is calibration data, not a recognition catalog."
+        )
+        catalog_hint.setWordWrap(True)
         self._recognition_summary = QLabel()
         self._recognition_summary.setWordWrap(True)
         self._recognition_view = QPlainTextEdit()
@@ -287,12 +369,22 @@ class CalibrationWindow(QMainWindow):
         )
         self._apply_overrides_button = QPushButton("Apply recognition overrides")
         self._apply_overrides_button.clicked.connect(self._apply_recognition_overrides)
+        self._save_report_button = QPushButton("Save recognition report…")
+        self._save_report_button.clicked.connect(self._save_recognition_report_dialog)
+        self._save_overrides_button = QPushButton("Save recognition overrides…")
+        self._save_overrides_button.clicked.connect(self._save_recognition_overrides_dialog)
+        self._save_draft_button = QPushButton("Save level draft…")
+        self._save_draft_button.clicked.connect(self._save_level_draft_dialog)
         layout.addWidget(self._recognize_button)
+        layout.addWidget(catalog_hint)
         layout.addWidget(self._recognition_summary)
         layout.addWidget(self._recognition_view)
         layout.addWidget(QLabel("Recognition overrides (JSON)"))
         layout.addWidget(self._overrides_editor)
         layout.addWidget(self._apply_overrides_button)
+        layout.addWidget(self._save_report_button)
+        layout.addWidget(self._save_overrides_button)
+        layout.addWidget(self._save_draft_button)
 
         layout.addWidget(QLabel("Authoritative semantic level"))
         self._load_level_button = QPushButton("Open level.json…")
@@ -315,6 +407,37 @@ class CalibrationWindow(QMainWindow):
         layout.addWidget(self._save_level_button)
         layout.addWidget(self._level_editor)
         layout.addWidget(self._semantic_status)
+
+        layout.addWidget(QLabel("Placement inspection and replay"))
+        self._load_placement_button = QPushButton("Open placement.json…")
+        self._load_placement_button.clicked.connect(self._open_placement_dialog)
+        self._validate_placement_button = QPushButton("Validate placement")
+        self._validate_placement_button.clicked.connect(self._validate_placement_editor)
+        self._save_placement_button = QPushButton("Save placement.json…")
+        self._save_placement_button.clicked.connect(self._save_placement_editor)
+        self._placement_editor = QPlainTextEdit()
+        self._placement_editor.setPlaceholderText(
+            "Open or paste a RailPlacement JSON document to inspect its topology and replay it."
+        )
+        self._placement_editor.setMinimumHeight(160)
+        self._placement_editor.textChanged.connect(self._placement_editor_changed)
+        self._inspect_topology_button = QPushButton("Inspect compiled topology")
+        self._inspect_topology_button.clicked.connect(self._inspect_topology)
+        self._replay_placement_button = QPushButton("Replay placement")
+        self._replay_placement_button.clicked.connect(self._replay_placement)
+        self._placement_status = QLabel()
+        self._placement_status.setWordWrap(True)
+        self._placement_inspection_output = QPlainTextEdit()
+        self._placement_inspection_output.setReadOnly(True)
+        self._placement_inspection_output.setMinimumHeight(180)
+        layout.addWidget(self._load_placement_button)
+        layout.addWidget(self._validate_placement_button)
+        layout.addWidget(self._save_placement_button)
+        layout.addWidget(self._placement_editor)
+        layout.addWidget(self._inspect_topology_button)
+        layout.addWidget(self._replay_placement_button)
+        layout.addWidget(self._placement_status)
+        layout.addWidget(self._placement_inspection_output)
 
         layout.addWidget(QLabel("Baseline solver"))
         self._max_placements = QSpinBox()
@@ -360,23 +483,257 @@ class CalibrationWindow(QMainWindow):
         """Return the latest result produced inside this interactive session."""
         return self._solver_result
 
+    def _new_template_catalog(self) -> None:
+        """Start an empty in-memory catalog without discarding the extracted crops."""
+        self._catalog_templates.clear()
+        self._catalog_recognizer_version = "template-ncc-v1"
+        self._catalog_thresholds = RecognitionThresholds()
+        self._template_catalog_path = None
+        self._template_id_editor.clear()
+        self._template_label_editor.clear()
+        self._refresh_template_catalog_view()
+        self._catalog_status.setText(
+            "New empty catalog. Select extracted crops and give each visual class a label."
+        )
+
+    def _open_template_catalog_dialog(self) -> None:
+        """Load labelled reference images and their portable catalog into this session."""
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open template catalog",
+            str(
+                self._template_catalog_path.parent
+                if self._template_catalog_path is not None
+                else self._image_path.parent
+                if self._image_path is not None
+                else Path.cwd()
+            ),
+            "Template catalog JSON (*.json)",
+        )
+        if selected:
+            self._load_template_catalog_from_path(Path(selected))
+
+    def _load_template_catalog_from_path(self, path: Path) -> None:
+        """Adopt one portable catalog and decoded references for in-memory recognition."""
+        try:
+            catalog = load_template_catalog(path)
+            templates = load_template_images(catalog, path)
+        except ValidationError as error:
+            first_error = error.errors()[0]["msg"]
+            self._show_error(
+                f"{path.name} is not a valid template catalog. Choose the labelled catalog JSON "
+                "with a top-level `templates` list, not grid.json, a crop manifest, or a level "
+                f"file. First problem: {first_error}"
+            )
+            return
+        except (OSError, ValueError) as error:
+            self._show_error(f"Could not load template catalog: {error}")
+            return
+
+        self._catalog_templates = {template.definition.id: template for template in templates}
+        self._catalog_recognizer_version = catalog.recognizer_version
+        self._catalog_thresholds = catalog.thresholds
+        self._template_catalog_path = path
+        self._refresh_template_catalog_view()
+        self._catalog_status.setText(
+            f"Loaded {len(templates)} template(s) from {path.name}. "
+            "You can use them immediately or add/update references from this screenshot."
+        )
+
+    def _save_template_catalog_dialog(self) -> None:
+        """Choose a portable catalog path for the in-memory reference set."""
+        if not self._catalog_templates:
+            self._show_error("Add or open at least one template before saving a catalog.")
+            return
+        suggested = self._template_catalog_path or Path("catalog.json")
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save template catalog",
+            str(suggested),
+            "Template catalog JSON (*.json)",
+        )
+        if selected:
+            self._save_template_catalog_to_path(Path(selected).with_suffix(".json"))
+
+    def _save_template_catalog_to_path(self, path: Path) -> None:
+        """Write catalog JSON and its labelled reference images below ``path``."""
+        if not self._catalog_templates:
+            self._show_error("Add or open at least one template before saving a catalog.")
+            return
+        saved_templates: dict[str, Template] = {}
+        try:
+            references_directory = path.parent / "references"
+            references_directory.mkdir(parents=True, exist_ok=True)
+            for template in self._ordered_catalog_templates():
+                definition = TemplateDefinition(
+                    id=template.definition.id,
+                    label=template.definition.label,
+                    image=f"references/{template.definition.id}.png",
+                    rotations=template.definition.rotations,
+                )
+                image_path = path.parent / definition.image
+                if not cv2.imwrite(str(image_path), template.image):
+                    raise OSError(f"could not write template image: {image_path}")
+                saved_templates[definition.id] = Template(
+                    definition=definition,
+                    image=template.image.copy(),
+                )
+            catalog = TemplateCatalog(
+                recognizer_version=self._catalog_recognizer_version,
+                thresholds=self._catalog_thresholds,
+                templates=tuple(
+                    saved_templates[template_id].definition
+                    for template_id in sorted(saved_templates)
+                ),
+            )
+            save_template_catalog(catalog, path)
+        except (OSError, ValueError) as error:
+            self._show_error(f"Could not save template catalog: {error}")
+            return
+
+        self._catalog_templates = saved_templates
+        self._template_catalog_path = path
+        self._refresh_template_catalog_view()
+        self._catalog_status.setText(
+            f"Saved {len(saved_templates)} template(s) and catalog to {path}."
+        )
+
+    def _add_template_from_crop(self) -> None:
+        """Use one calibrated in-memory crop as a labelled visual reference."""
+        crop = self._selected_template_crop()
+        if crop is None:
+            self._show_error("Extract cells and select a source crop before adding a template.")
+            return
+        template_id = self._template_id_editor.text().strip() or self._suggested_template_id(crop)
+        existing = self._catalog_templates.get(template_id)
+        try:
+            if existing is None:
+                definition = TemplateDefinition(
+                    id=template_id,
+                    label=self._template_label_editor.text().strip(),
+                    image=f"references/{template_id}.png",
+                )
+            else:
+                definition = TemplateDefinition(
+                    id=template_id,
+                    label=self._template_label_editor.text().strip(),
+                    image=f"references/{template_id}.png",
+                    rotations=existing.definition.rotations,
+                )
+        except ValueError as error:
+            self._show_error(f"Template ID or label is invalid: {error}")
+            return
+
+        image = crop.image.copy()
+        self._catalog_templates[definition.id] = Template(definition=definition, image=image)
+        self._refresh_template_catalog_view(selected_id=definition.id)
+        self._catalog_status.setText(
+            f"Stored crop ({crop.cell.row}, {crop.cell.col}) as template {definition.id!r}."
+        )
+
+    def _remove_selected_template(self) -> None:
+        """Remove the selected in-memory reference from the pending catalog."""
+        row = self._template_list.currentRow()
+        template_ids = self._catalog_template_ids()
+        if row < 0 or row >= len(template_ids):
+            self._show_error("Select a template to remove.")
+            return
+        removed_id = template_ids[row]
+        del self._catalog_templates[removed_id]
+        self._refresh_template_catalog_view()
+        self._catalog_status.setText(f"Removed template {removed_id!r} from the in-memory catalog.")
+
+    def _template_selection_changed(self, row: int) -> None:
+        """Expose the selected template fields for deliberate editing or replacement."""
+        template_ids = self._catalog_template_ids()
+        if row < 0 or row >= len(template_ids):
+            return
+        template = self._catalog_templates[template_ids[row]]
+        self._template_id_editor.setText(template.definition.id)
+        self._template_label_editor.setText(template.definition.label)
+
+    def _selected_template_crop(self) -> CellCrop | None:
+        """Return the crop chosen by the catalog authoring controls."""
+        index = self._template_crop_selector.currentIndex()
+        if index < 0 or index >= len(self._crops):
+            return None
+        return self._crops[index]
+
+    def _suggested_template_id(self, crop: CellCrop) -> str:
+        """Generate a readable unique ID so catalog authoring only requires a label."""
+        label = self._template_label_editor.text().strip().lower()
+        characters = (
+            character
+            if character.isascii() and (character.isalnum() or character in ".-_:")
+            else "-"
+            for character in label
+        )
+        prefix = "".join(characters).strip("-.") or "reference"
+        base = f"{prefix}-r{crop.cell.row:03d}-c{crop.cell.col:03d}"
+        template_id = base
+        suffix = 2
+        while template_id in self._catalog_templates:
+            template_id = f"{base}-{suffix}"
+            suffix += 1
+        return template_id
+
+    def _ordered_catalog_templates(self) -> tuple[Template, ...]:
+        """Return in-memory templates in the recognizer's stable ID order."""
+        return tuple(
+            self._catalog_templates[template_id] for template_id in self._catalog_template_ids()
+        )
+
+    def _catalog_template_ids(self) -> list[str]:
+        """Return reference IDs in the same deterministic order used for recognition."""
+        return sorted(self._catalog_templates)
+
+    def _build_template_catalog(self) -> TemplateCatalog:
+        """Create the validated catalog corresponding to the current in-memory images."""
+        return TemplateCatalog(
+            recognizer_version=self._catalog_recognizer_version,
+            thresholds=self._catalog_thresholds,
+            templates=tuple(template.definition for template in self._ordered_catalog_templates()),
+        )
+
+    def _refresh_template_crop_choices(self) -> None:
+        """Present every row-major extracted crop as a possible labelled reference."""
+        previous_index = self._template_crop_selector.currentIndex()
+        self._template_crop_selector.blockSignals(True)
+        self._template_crop_selector.clear()
+        for index, crop in enumerate(self._crops):
+            self._template_crop_selector.addItem(f"({crop.cell.row}, {crop.cell.col})", index)
+        if self._crops:
+            self._template_crop_selector.setCurrentIndex(
+                min(max(previous_index, 0), len(self._crops) - 1)
+            )
+        self._template_crop_selector.blockSignals(False)
+
+    def _refresh_template_catalog_view(self, *, selected_id: str | None = None) -> None:
+        """Render in-memory references without writing catalog files prematurely."""
+        self._template_list.blockSignals(True)
+        self._template_list.clear()
+        template_ids = self._catalog_template_ids()
+        for template_id in template_ids:
+            definition = self._catalog_templates[template_id].definition
+            self._template_list.addItem(f"{definition.id} — {definition.label}")
+        if selected_id is not None and selected_id in template_ids:
+            self._template_list.setCurrentRow(template_ids.index(selected_id))
+        self._template_list.blockSignals(False)
+        self._update_semantic_controls()
+
     def _recognize_crops(self) -> None:
         """Recognize the current in-memory crops without writing intermediate files."""
         if self._image is None or self._grid is None or self._crop_spec is None or not self._crops:
             self._show_error("Extract calibrated cells before starting recognition.")
             return
-        selected, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open template catalog",
-            str(self._image_path.parent if self._image_path else Path.cwd()),
-            "Template catalog JSON (*.json)",
-        )
-        if not selected:
+        if not self._catalog_templates:
+            self._show_error(
+                "Create a template catalog from extracted crops or open an existing catalog first."
+            )
             return
-        catalog_path = Path(selected)
         try:
-            catalog = load_template_catalog(catalog_path)
-            recognizer = TemplateRecognizer(catalog, load_template_images(catalog, catalog_path))
+            catalog = self._build_template_catalog()
+            recognizer = TemplateRecognizer(catalog, self._ordered_catalog_templates())
             observations = tuple(recognizer.recognize(crop) for crop in self._crops)
             source = RecognitionSource(
                 image_sha256=self._image_hash,
@@ -405,15 +762,25 @@ class CalibrationWindow(QMainWindow):
         self._overrides_editor.setPlainText("[]")
         self._apply_recognition_overrides()
 
+    def _recognition_overrides(self) -> tuple[RecognitionOverride, ...] | None:
+        """Parse the visible manual decisions before applying or exporting them."""
+        try:
+            return _OVERRIDES_ADAPTER.validate_json(
+                self._overrides_editor.toPlainText().strip() or "[]"
+            )
+        except ValueError as error:
+            self._show_error(f"Recognition overrides are invalid: {error}")
+            return None
+
     def _apply_recognition_overrides(self) -> None:
         """Apply visible manual recognition choices to the current report."""
         if self._recognition_report is None:
             self._show_error("Run recognition before applying overrides.")
             return
+        overrides = self._recognition_overrides()
+        if overrides is None:
+            return
         try:
-            overrides = _OVERRIDES_ADAPTER.validate_json(
-                self._overrides_editor.toPlainText().strip() or "[]"
-            )
             self._level_draft = resolve(self._recognition_report, overrides)
         except ValueError as error:
             self._show_error(f"Could not apply recognition overrides: {error}")
@@ -421,6 +788,83 @@ class CalibrationWindow(QMainWindow):
 
         self._render_recognition_review(self._recognition_report, self._level_draft)
         self._update_semantic_controls()
+
+    def _save_recognition_report_dialog(self) -> None:
+        """Persist the full matching evidence from the current interactive session."""
+        if self._recognition_report is None:
+            self._show_error("Run recognition before saving its report.")
+            return
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save recognition report",
+            "recognition_report.json",
+            "Recognition report JSON (*.json)",
+        )
+        if selected:
+            self._save_recognition_report_to_path(Path(selected).with_suffix(".json"))
+
+    def _save_recognition_report_to_path(self, path: Path) -> None:
+        """Write the current immutable evidence report to one explicit path."""
+        if self._recognition_report is None:
+            self._show_error("Run recognition before saving its report.")
+            return
+        try:
+            save_recognition_report(self._recognition_report, path)
+        except OSError as error:
+            self._show_error(f"Could not save recognition report: {error}")
+            return
+        self._recognition_summary.setText(f"Saved recognition report to {path}.")
+
+    def _save_recognition_overrides_dialog(self) -> None:
+        """Persist visible manual decisions independently from the recognition evidence."""
+        overrides = self._recognition_overrides()
+        if overrides is None:
+            return
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save recognition overrides",
+            "recognition_overrides.json",
+            "Recognition overrides JSON (*.json)",
+        )
+        if selected:
+            self._save_recognition_overrides_to_path(overrides, Path(selected).with_suffix(".json"))
+
+    def _save_recognition_overrides_to_path(
+        self, overrides: tuple[RecognitionOverride, ...], path: Path
+    ) -> None:
+        """Write explicit recognition choices in their portable JSON representation."""
+        try:
+            save_recognition_overrides(overrides, path)
+        except OSError as error:
+            self._show_error(f"Could not save recognition overrides: {error}")
+            return
+        self._recognition_summary.setText(f"Saved recognition overrides to {path}.")
+
+    def _save_level_draft_dialog(self) -> None:
+        """Persist the latest review state without turning it into a semantic level."""
+        if self._level_draft is None:
+            self._show_error("Apply recognition overrides before saving a level draft.")
+            return
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save level draft",
+            "level_draft.json",
+            "Level draft JSON (*.json)",
+        )
+        if selected:
+            self._save_level_draft_to_path(Path(selected).with_suffix(".json"))
+
+    def _save_level_draft_to_path(self, path: Path) -> None:
+        """Write the current review-state document for semantic authoring later."""
+        if self._level_draft is None:
+            self._show_error("Apply recognition overrides before saving a level draft.")
+            return
+        try:
+            save_level_draft(self._level_draft, path)
+        except OSError as error:
+            self._show_error(f"Could not save level draft: {error}")
+            return
+        self._recognition_summary.setText(f"Saved level draft to {path}.")
 
     def _render_recognition_review(self, report: RecognitionReport, draft: LevelDraft) -> None:
         """Show candidates, confidence, and unresolved cells in row-major order."""
@@ -480,10 +924,14 @@ class CalibrationWindow(QMainWindow):
     def _level_editor_changed(self) -> None:
         """Invalidate results whenever the authoritative document changes."""
         self._level = None
+        self._placement = None
+        self._placement_path = None
         self._solver_result = None
         self._save_solution_button.setEnabled(False)
         self._solver_trace.clear()
+        self._placement_inspection_output.clear()
         self._semantic_status.setText("Semantic level changed; validate it before solving.")
+        self._placement_status.setText("Validate the semantic level before using this placement.")
         self._solver_status.clear()
         self._update_semantic_controls()
 
@@ -534,6 +982,134 @@ class CalibrationWindow(QMainWindow):
         self._set_validated_level(level, output_path)
         self._semantic_status.setText(f"Saved and validated semantic level to {output_path}")
 
+    def _open_placement_dialog(self) -> None:
+        """Load a portable placement for topology inspection or deterministic replay."""
+        level = self._validate_level_editor()
+        if level is None:
+            return
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open rail placement",
+            str(self._placement_path.parent if self._placement_path else Path.cwd()),
+            "Placement JSON (*.json)",
+        )
+        if selected:
+            self._load_placement_from_path(Path(selected), level)
+
+    def _load_placement_from_path(self, path: Path, level: Level | None = None) -> None:
+        """Read a placement into the in-window editor and validate it against the level."""
+        active_level = level or self._validate_level_editor()
+        if active_level is None:
+            return
+        try:
+            raw_placement = path.read_text(encoding="utf-8")
+            placement = load_placement(path)
+            validate_placement(active_level, placement)
+        except (OSError, ValueError) as error:
+            self._show_error(f"Could not load rail placement: {error}")
+            return
+        self._placement_editor.setPlainText(raw_placement)
+        self._set_validated_placement(placement, path)
+
+    def _validate_placement_editor(self) -> RailPlacement | None:
+        """Validate editable placement JSON against the current semantic level."""
+        level = self._validate_level_editor()
+        if level is None:
+            return None
+        try:
+            placement = RailPlacement.model_validate_json(self._placement_editor.toPlainText())
+            validate_placement(level, placement)
+        except ValueError as error:
+            self._show_error(f"Rail placement is invalid: {error}")
+            return None
+        self._set_validated_placement(placement, self._placement_path)
+        return placement
+
+    def _placement_editor_changed(self) -> None:
+        """Prevent replaying an earlier placement after its JSON has been edited."""
+        self._placement = None
+        self._placement_status.setText(
+            "Placement changed; validate it before inspection or replay."
+        )
+        self._placement_inspection_output.clear()
+        self._update_semantic_controls()
+
+    def _set_validated_placement(self, placement: RailPlacement, path: Path | None) -> None:
+        """Adopt one placement that the current level accepts as legal."""
+        self._placement = placement
+        self._placement_path = path
+        self._placement_status.setText(
+            f"Validated placement for {placement.level_id!r} with {len(placement.rails)} rail(s)."
+        )
+        self._update_semantic_controls()
+
+    def _save_placement_editor(self) -> None:
+        """Persist the editable placement after it passes level-specific validation."""
+        placement = self._validate_placement_editor()
+        if placement is None:
+            return
+        suggested = self._placement_path or Path("placement.json")
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save rail placement",
+            str(suggested),
+            "Placement JSON (*.json)",
+        )
+        if not selected:
+            return
+        output_path = Path(selected).with_suffix(".json")
+        self._save_placement_to_path(placement, output_path)
+
+    def _save_placement_to_path(self, placement: RailPlacement, path: Path) -> None:
+        """Write a known-valid manual placement to an explicit destination."""
+        try:
+            save_placement(placement, path)
+        except OSError as error:
+            self._show_error(f"Could not save rail placement: {error}")
+            return
+        self._set_validated_placement(placement, path)
+        self._placement_status.setText(f"Saved validated rail placement to {path}.")
+
+    def _inspect_topology(self) -> None:
+        """Compile the current placement and expose its deterministic port graph summary."""
+        placement = self._validate_placement_editor()
+        if placement is None or self._level is None:
+            return
+        try:
+            board = compile_board(self._level, placement)
+        except ValueError as error:
+            self._show_error(f"Could not compile rail topology: {error}")
+            return
+        self._placement_inspection_output.setPlainText(_topology_summary(board))
+        self._placement_status.setText("Compiled topology is shown below.")
+
+    def _replay_placement(self) -> None:
+        """Run the M6–M7 simulator for the visible manual placement."""
+        placement = self._validate_placement_editor()
+        if placement is None or self._level is None:
+            return
+        try:
+            result = simulate(
+                self._level,
+                placement,
+                SimulationOptions(max_ticks=self._max_ticks.value()),
+            )
+        except ValueError as error:
+            self._show_error(f"Could not replay rail placement: {error}")
+            return
+        lines = [
+            f"Status: {result.final_state.status.value}",
+            f"Ticks: {result.final_state.tick}",
+            "",
+            "Trace:",
+            *(_event_summary(event) for event in result.events),
+        ]
+        self._placement_inspection_output.setPlainText("\n".join(lines))
+        outcome = "succeeded" if result.succeeded else "ended without success"
+        self._placement_status.setText(
+            f"Simulator {outcome} after {result.final_state.tick} tick(s)."
+        )
+
     def _solve_level(self) -> None:
         """Search the in-window semantic level and render its verified replay."""
         level = self._validate_level_editor()
@@ -554,6 +1130,11 @@ class CalibrationWindow(QMainWindow):
             return
 
         self._save_solution_button.setEnabled(self._solver_result.solved)
+        if self._solver_result.placement is not None:
+            self._placement_editor.setPlainText(
+                self._solver_result.placement.model_dump_json(indent=2)
+            )
+            self._set_validated_placement(self._solver_result.placement, None)
         self._render_solver_result(self._solver_result)
 
     def _render_solver_result(self, result: SolverResult) -> None:
@@ -594,7 +1175,7 @@ class CalibrationWindow(QMainWindow):
         ):
             self._show_error("Solve the level successfully before saving a placement.")
             return
-        suggested = self._placement_output or (
+        suggested = self._solution_output_path or (
             self._level_path.with_name(f"{self._level.id}-solution.json")
             if self._level_path is not None and self._level is not None
             else Path("solution.json")
@@ -620,19 +1201,35 @@ class CalibrationWindow(QMainWindow):
         except OSError as error:
             self._show_error(f"Could not save verified placement: {error}")
             return
-        self._placement_output = output_path
+        self._solution_output_path = output_path
         self._solver_status.setText(f"Saved verified placement to {output_path}")
 
     def _update_semantic_controls(self) -> None:
         """Enable each in-window stage only when its in-memory input exists."""
         has_crops = bool(self._crops)
+        has_catalog = bool(self._catalog_templates)
         has_report = self._recognition_report is not None
+        has_draft = self._level_draft is not None
         has_level_text = bool(self._level_editor.toPlainText().strip())
-        self._recognize_button.setEnabled(has_crops)
+        has_placement_text = bool(self._placement_editor.toPlainText().strip())
+        has_template_fields = bool(self._template_label_editor.text().strip())
+        self._template_crop_selector.setEnabled(has_crops)
+        self._add_template_button.setEnabled(has_crops and has_template_fields)
+        self._remove_template_button.setEnabled(self._template_list.currentRow() >= 0)
+        self._save_catalog_button.setEnabled(has_catalog)
+        self._recognize_button.setEnabled(has_crops and has_catalog)
         self._apply_overrides_button.setEnabled(has_report)
+        self._save_report_button.setEnabled(has_report)
+        self._save_overrides_button.setEnabled(has_report)
+        self._save_draft_button.setEnabled(has_draft)
         self._validate_level_button.setEnabled(has_level_text)
         self._save_level_button.setEnabled(has_level_text)
         self._solve_button.setEnabled(has_level_text)
+        self._load_placement_button.setEnabled(has_level_text)
+        self._validate_placement_button.setEnabled(has_level_text and has_placement_text)
+        self._save_placement_button.setEnabled(has_level_text and has_placement_text)
+        self._inspect_topology_button.setEnabled(has_level_text and has_placement_text)
+        self._replay_placement_button.setEnabled(has_level_text and has_placement_text)
 
     def load_image(self, path: Path) -> None:
         image = cast(ColorImage | None, cv2.imread(str(path), cv2.IMREAD_COLOR))
@@ -969,6 +1566,7 @@ class CalibrationWindow(QMainWindow):
         self._cell_mask.setEnabled(ready and self._crop_mode.currentIndex() == 1)
         self._extract_button.setEnabled(ready)
         self._show_crops_button.setEnabled(bool(self._crops))
+        self._export_crops_button.setEnabled(bool(self._crops))
         if self._detect_button is not None:
             self._detect_button.setEnabled(self._image is not None)
 
@@ -988,6 +1586,7 @@ class CalibrationWindow(QMainWindow):
         self._overrides_editor.setPlainText("[]")
         self._save_solution_button.setEnabled(False)
         self._solver_trace.clear()
+        self._refresh_template_crop_choices()
         if self._crop_preview is not None:
             self._crop_preview.hide()
         self._update_semantic_controls()
@@ -1017,6 +1616,7 @@ class CalibrationWindow(QMainWindow):
         self._crops = crops
         self._crop_spec = spec
         self._contact_sheet = contact_sheet
+        self._refresh_template_crop_choices()
         self._crop_summary.setText(
             f"Extracted {len(crops)} cells in memory ({spec.mode}, {spec.output_size} × "
             f"{spec.output_size} px). No files were written."
@@ -1025,6 +1625,41 @@ class CalibrationWindow(QMainWindow):
         self._update_extraction_controls()
         self._update_semantic_controls()
         self._show_crop_preview()
+
+    def _export_crops(self) -> None:
+        """Write the optional M2 crop artifacts for sharing or batch recognition."""
+        if self._grid is None or self._crop_spec is None or not self._crops:
+            self._show_error("Extract cells before exporting crop artifacts.")
+            return
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Choose directory for crops, manifest, and contact sheet",
+            str(self._image_path.parent if self._image_path is not None else Path.cwd()),
+        )
+        if selected:
+            self._export_crops_to_directory(Path(selected))
+
+    def _export_crops_to_directory(self, output_directory: Path) -> None:
+        """Persist the current crop set using the same M2 portable artifact format as the CLI."""
+        if self._grid is None or self._crop_spec is None or self._contact_sheet is None:
+            self._show_error("Extract cells before exporting crop artifacts.")
+            return
+        try:
+            manifest = write_crop_set(
+                self._crops,
+                grid=self._grid,
+                spec=self._crop_spec,
+                output_directory=output_directory,
+            )
+            contact_sheet_path = output_directory / "contact_sheet.png"
+            if not cv2.imwrite(str(contact_sheet_path), self._contact_sheet):
+                raise OSError(f"could not write contact sheet: {contact_sheet_path}")
+        except (OSError, ValueError) as error:
+            self._show_error(f"Could not export crop artifacts: {error}")
+            return
+        self._crop_summary.setText(
+            f"Exported {len(manifest.crops)} crops, manifest, and contact sheet to {output_directory}."
+        )
 
     def _show_crop_preview(self) -> None:
         if self._contact_sheet is None:
@@ -1098,6 +1733,43 @@ def _event_summary(event: SimulationEvent) -> str:
     return (
         f"{event.sequence:04d}  tick {event.tick}  {event.kind.value}  {actors}{location}{reason}"
     )
+
+
+def _topology_summary(board: CompiledBoard) -> str:
+    """Render the M5 compiled graph without exposing mutable implementation details."""
+    lines = [
+        f"Level: {board.level_id}",
+        f"Pieces: {len(board.pieces)}",
+        f"Internal connections: {len(board.internal_connections)}",
+        f"Adjacent connections: {len(board.adjacency_connections)}",
+        f"Connected components: {len(board.connected_components)}",
+        f"Boundary exits: {len(board.boundary_exits)}",
+        f"Unconnected ports: {len(board.unconnected_ports)}",
+    ]
+    if board.pieces:
+        lines.extend(("", "Pieces:"))
+        for piece in board.pieces:
+            if piece.source == "fixed":
+                source = piece.id or "fixed"
+            else:
+                source = piece.piece_kind.value if piece.piece_kind is not None else "placement"
+            orientation = "" if piece.orientation is None else f" {piece.orientation.value}"
+            ports = ",".join(port.value for port in piece.ports)
+            lines.append(
+                f"  ({piece.cell.row}, {piece.cell.col}) {piece.source}: {source}{orientation} [{ports}]"
+            )
+    if board.unconnected_ports:
+        lines.extend(("", "Unconnected ports:"))
+        lines.extend(f"  {_port_node_summary(port)}" for port in board.unconnected_ports)
+    if board.boundary_exits:
+        lines.extend(("", "Boundary exits:"))
+        lines.extend(f"  {_port_node_summary(port)}" for port in board.boundary_exits)
+    return "\n".join(lines)
+
+
+def _port_node_summary(port: PortNode) -> str:
+    """Format one immutable graph vertex for human topology inspection."""
+    return f"({port.cell.row}, {port.cell.col}) {port.port.value}"
 
 
 def _bgr_to_qimage(image: ColorImage) -> QImage:
