@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -13,9 +14,11 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication
 
-from railbound.geometry import GridGeometry, PixelPoint
+from railbound.extraction import CropSpec
+from railbound.geometry import CellCoord, GridGeometry, PixelPoint
 from railbound.gui import CalibrationWindow
 from railbound.placement_io import load_placement
+from railbound.recognition import LevelDraft, RecognitionSource, ResolvedCell
 
 
 def _lattice_image() -> np.ndarray:
@@ -92,6 +95,7 @@ def test_gui_extracts_authors_catalog_and_exports_portable_artifacts(tmp_path: P
     assert len(window._catalog_templates) == 1
     assert window._recognition_report is not None
     assert window._level_draft is not None
+    assert window._create_level_from_draft_button.isEnabled()
     assert report_path.is_file()
     assert draft_path.is_file()
     assert (export_directory / "manifest.json").is_file()
@@ -99,6 +103,100 @@ def test_gui_extracts_authors_catalog_and_exports_portable_artifacts(tmp_path: P
 
     if window._crop_preview is not None:
         window._crop_preview.close()
+    window.close()
+
+
+def test_gui_creates_semantic_template_from_saved_recognition_draft(tmp_path: Path) -> None:
+    application = QApplication.instance() or QApplication([])
+    draft_path = tmp_path / "level_draft.json"
+    window = CalibrationWindow()
+    window._image = np.full((20, 20, 3), 120, dtype=np.uint8)
+    window._grid = GridGeometry.from_manual_calibration(
+        rows=2,
+        cols=2,
+        image_width=20,
+        image_height=20,
+        origin=PixelPoint(x=5, y=5),
+        next_col=PixelPoint(x=15, y=5),
+        next_row=PixelPoint(x=5, y=15),
+    )
+    window._points = [
+        PixelPoint(x=5, y=5),
+        PixelPoint(x=15, y=5),
+        PixelPoint(x=5, y=15),
+        PixelPoint(x=15, y=15),
+    ]
+    window._update_extraction_controls()
+    window._extract_cells()
+    window._template_label_editor.setText("terrain.empty")
+    window._add_template_from_crop()
+    window._recognize_crops()
+    window._save_level_draft_to_path(draft_path)
+    window.close()
+
+    restored = CalibrationWindow()
+    restored._load_level_from_path(draft_path)
+
+    assert application is not None
+    assert restored._level_draft is not None
+    assert restored._create_level_from_draft_button.isEnabled()
+
+    restored._create_level_from_draft()
+
+    template = json.loads(restored._level_editor.toPlainText())
+    assert template["rows"] == 2
+    assert template["cols"] == 2
+    assert len(template["terrain"]) == 4
+    assert template["actors"] == []
+    assert "actors, buildable cells" in restored._semantic_status.text()
+    restored.close()
+
+
+def test_gui_builds_a_valid_level_from_reviewed_standard_labels() -> None:
+    application = QApplication.instance() or QApplication([])
+    cells = (
+        (0, 0, "actor.train"),
+        (0, 1, "terrain.empty"),
+        (0, 2, "actor.train"),
+        (1, 0, "terrain.empty"),
+        (1, 1, "terrain.occupied"),
+        (1, 2, "goal.arrival"),
+    )
+    window = CalibrationWindow()
+    window._level_draft = LevelDraft(
+        source=RecognitionSource(
+            image_width=300,
+            image_height=200,
+            rows=2,
+            cols=3,
+            crop_spec=CropSpec(),
+        ),
+        recognition_report_fingerprint="0" * 64,
+        resolved_cells=tuple(
+            ResolvedCell(
+                cell=CellCoord(row=row, col=col),
+                label=label,
+                source="override",
+            )
+            for row, col, label in cells
+        ),
+        unresolved_cells=(),
+    )
+    window._refresh_semantic_mapping_form()
+    window._update_semantic_controls()
+    window._semantic_inventory.setValue(4)
+    for selector in window._actor_direction_selectors.values():
+        selector.setCurrentIndex(2)
+
+    window._build_level_from_labels()
+
+    assert application is not None
+    assert window._level is not None
+    assert [actor.id for actor in window._level.actors] == ["train-1", "train-2"]
+    assert len(window._level.buildable_cells) == 5
+    assert window._level.rail_inventory.total_budget == 4
+    assert window._level.win_condition.required_arrivals[0].target_cell == CellCoord(row=1, col=2)
+    assert "Built and validated level" in window._semantic_status.text()
     window.close()
 
 

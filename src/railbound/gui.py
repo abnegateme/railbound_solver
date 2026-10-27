@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Literal, cast
 
@@ -187,6 +188,8 @@ class CalibrationWindow(QMainWindow):
         self._detect_button: QPushButton | None = None
         self._recognition_report: RecognitionReport | None = None
         self._level_draft: LevelDraft | None = None
+        self._actor_direction_selectors: dict[tuple[int, int], QComboBox] = {}
+        self._actor_goal_selectors: dict[tuple[int, int], QComboBox] = {}
         self._catalog_templates: dict[str, Template] = {}
         self._catalog_recognizer_version = "template-ncc-v1"
         self._catalog_thresholds = RecognitionThresholds()
@@ -321,9 +324,10 @@ class CalibrationWindow(QMainWindow):
             "semantic candidate label, e.g. terrain.empty"
         )
         label_hint = QLabel(
-            "Suggested labels: terrain.empty, track.straight, track.curve, "
-            "track.crossing, actor.train, goal.arrival, device.switch, "
-            "device.button, device.gate, device.tunnel. Use one visual class per label."
+            "For automatic level construction use terrain.empty, terrain.occupied, actor.train, "
+            "and goal.arrival. Other useful labels include track.straight, track.curve, "
+            "track.crossing, device.switch, device.button, device.gate, and device.tunnel. "
+            "Use one visual class per label."
         )
         label_hint.setWordWrap(True)
         self._template_id_editor.textChanged.connect(self._update_semantic_controls)
@@ -386,8 +390,35 @@ class CalibrationWindow(QMainWindow):
         layout.addWidget(self._save_overrides_button)
         layout.addWidget(self._save_draft_button)
 
+        layout.addWidget(QLabel("Build semantic level from reviewed labels"))
+        self._semantic_mapping_summary = QLabel(
+            "Resolve recognition cells to configure a semantic level from their labels."
+        )
+        self._semantic_mapping_summary.setWordWrap(True)
+        self._semantic_mapping_form = QFormLayout()
+        self._semantic_level_id = QLineEdit("reviewed-level")
+        self._semantic_level_id.setPlaceholderText("level ID")
+        self._semantic_inventory = QSpinBox()
+        self._semantic_inventory.setRange(0, 10_000)
+        self._semantic_inventory.setValue(0)
+        self._semantic_settings_form = QFormLayout()
+        self._semantic_settings_form.addRow("Level ID", self._semantic_level_id)
+        self._semantic_settings_form.addRow("Available rails", self._semantic_inventory)
+        self._build_level_from_labels_button = QPushButton(
+            "Build validated level from reviewed labels"
+        )
+        self._build_level_from_labels_button.clicked.connect(self._build_level_from_labels)
+        layout.addWidget(self._semantic_mapping_summary)
+        layout.addLayout(self._semantic_settings_form)
+        layout.addLayout(self._semantic_mapping_form)
+        layout.addWidget(self._build_level_from_labels_button)
+
         layout.addWidget(QLabel("Authoritative semantic level"))
-        self._load_level_button = QPushButton("Open level.json…")
+        self._create_level_from_draft_button = QPushButton(
+            "Create editable level template from reviewed recognition"
+        )
+        self._create_level_from_draft_button.clicked.connect(self._create_level_from_draft)
+        self._load_level_button = QPushButton("Open level.json or level draft…")
         self._load_level_button.clicked.connect(self._open_level_dialog)
         self._validate_level_button = QPushButton("Validate semantic level")
         self._validate_level_button.clicked.connect(self._validate_level_editor)
@@ -395,13 +426,14 @@ class CalibrationWindow(QMainWindow):
         self._save_level_button.clicked.connect(self._save_level_editor)
         self._level_editor = QPlainTextEdit()
         self._level_editor.setPlaceholderText(
-            "Open or paste the complete authoritative level.json here. Recognition labels are "
-            "review evidence; confirm their semantic mapping, inventory, actors, and goals here."
+            "Create a template from reviewed recognition, or open/paste a complete authoritative "
+            "level.json here. Confirm actors, rails, inventory, and goals before validation."
         )
         self._level_editor.setMinimumHeight(220)
         self._level_editor.textChanged.connect(self._level_editor_changed)
         self._semantic_status = QLabel()
         self._semantic_status.setWordWrap(True)
+        layout.addWidget(self._create_level_from_draft_button)
         layout.addWidget(self._load_level_button)
         layout.addWidget(self._validate_level_button)
         layout.addWidget(self._save_level_button)
@@ -786,6 +818,7 @@ class CalibrationWindow(QMainWindow):
             self._show_error(f"Could not apply recognition overrides: {error}")
             return
 
+        self._refresh_semantic_mapping_form()
         self._render_recognition_review(self._recognition_report, self._level_draft)
         self._update_semantic_controls()
 
@@ -883,9 +916,199 @@ class CalibrationWindow(QMainWindow):
             )
         else:
             self._recognition_summary.setText(
-                "Every cell has a reviewed label. Complete the semantic level below before solving."
+                "Every cell has a reviewed label. Build a semantic level from the standard "
+                "terrain/train/goal labels below, or use the advanced JSON template for other rules."
             )
         self._recognition_view.setPlainText("\n".join(lines))
+
+    def _draft_cells(self, label: str) -> tuple[CellCoord, ...]:
+        """Return reviewed cells with one exact recognition label in row-major order."""
+        if self._level_draft is None:
+            return ()
+        return tuple(
+            resolved.cell
+            for resolved in self._level_draft.resolved_cells
+            if resolved.label == label
+        )
+
+    def _refresh_semantic_mapping_form(self) -> None:
+        """Show only semantic facts that recognition labels do not encode."""
+        while self._semantic_mapping_form.rowCount():
+            self._semantic_mapping_form.removeRow(0)
+        self._actor_direction_selectors.clear()
+        self._actor_goal_selectors.clear()
+
+        if self._level_draft is None:
+            self._semantic_mapping_summary.setText(
+                "Resolve recognition cells to configure a semantic level from their labels."
+            )
+            return
+
+        actors = self._draft_cells("actor.train")
+        goals = self._draft_cells("goal.arrival")
+        empty_cells = self._draft_cells("terrain.empty")
+        occupied_cells = self._draft_cells("terrain.occupied")
+        if not self._level_draft.is_complete:
+            self._semantic_mapping_summary.setText(
+                "Resolve every recognition cell before building a semantic level."
+            )
+            return
+
+        self._semantic_mapping_summary.setText(
+            f"Recognized {len(actors)} train(s), {len(goals)} arrival goal(s), "
+            f"{len(empty_cells)} empty cell(s), and {len(occupied_cells)} blocked cell(s). "
+            "Choose train directions and rail budget; labels already supply positions and terrain. "
+            "With one goal, every recognized train is assigned to it."
+        )
+        for index, cell in enumerate(actors, start=1):
+            direction = QComboBox()
+            direction.addItem("Choose direction…", None)
+            for code, name in (("N", "North"), ("E", "East"), ("S", "South"), ("W", "West")):
+                direction.addItem(f"{name} ({code})", code)
+            key = (cell.row, cell.col)
+            self._actor_direction_selectors[key] = direction
+            self._semantic_mapping_form.addRow(
+                f"Train {index} at ({cell.row}, {cell.col}) direction", direction
+            )
+            if len(goals) > 1:
+                goal = QComboBox()
+                for goal_index, goal_cell in enumerate(goals):
+                    goal.addItem(
+                        f"Goal at ({goal_cell.row}, {goal_cell.col})",
+                        goal_index,
+                    )
+                self._actor_goal_selectors[key] = goal
+                self._semantic_mapping_form.addRow(f"Train {index} arrival goal", goal)
+        if not actors:
+            self._semantic_mapping_summary.setText(
+                "No actor.train label is present. Label each starting train before building a level."
+            )
+        elif not goals:
+            self._semantic_mapping_summary.setText(
+                "No goal.arrival label is present. Label each arrival cell before building a level."
+            )
+
+    def _build_level_from_labels(self) -> None:
+        """Materialize the supported reviewed-label profile as a validated level."""
+        if self._level_draft is None or not self._level_draft.is_complete:
+            self._show_error("Resolve every recognition cell before building a semantic level.")
+            return
+        actors = self._draft_cells("actor.train")
+        goals = self._draft_cells("goal.arrival")
+        if not actors or not goals:
+            self._show_error(
+                "A level built from labels requires at least one actor.train and one goal.arrival."
+            )
+            return
+        level_id = self._semantic_level_id.text().strip()
+        if not level_id:
+            self._show_error("Enter a level ID before building the semantic level.")
+            return
+
+        directions: list[str] = []
+        for index, cell in enumerate(actors, start=1):
+            direction = self._actor_direction_selectors[(cell.row, cell.col)].currentData()
+            if not isinstance(direction, str):
+                self._show_error(
+                    f"Choose the direction for train {index} at ({cell.row}, {cell.col})."
+                )
+                return
+            directions.append(direction)
+
+        actor_documents: list[dict[str, object]] = []
+        arrival_documents: list[dict[str, object]] = []
+        for index, (cell, direction) in enumerate(zip(actors, directions, strict=True), start=1):
+            actor_id = f"train-{index}"
+            actor_documents.append(
+                {
+                    "id": actor_id,
+                    "cell": _cell_document(cell),
+                    "direction": direction,
+                    "actor_type": "train",
+                    "number": index,
+                }
+            )
+            goal_index = 0
+            selector = self._actor_goal_selectors.get((cell.row, cell.col))
+            if selector is not None:
+                selected_goal = selector.currentData()
+                if not isinstance(selected_goal, int):
+                    self._show_error(f"Choose an arrival goal for train {index}.")
+                    return
+                goal_index = selected_goal
+            arrival_documents.append(
+                {
+                    "actor_id": actor_id,
+                    "target_cell": _cell_document(goals[goal_index]),
+                }
+            )
+
+        terrain_documents = [
+            {"cell": _cell_document(cell), "kind": label}
+            for label in ("terrain.empty", "terrain.occupied")
+            for cell in self._draft_cells(label)
+        ]
+        buildable_cells = [
+            _cell_document(cell)
+            for label in ("terrain.empty", "actor.train", "goal.arrival")
+            for cell in self._draft_cells(label)
+        ]
+        document: dict[str, object] = {
+            "schema_version": 1,
+            "ruleset_version": "railbound-observed-v1",
+            "id": level_id,
+            "metadata": {"source": "reviewed-recognition-labels"},
+            "rows": self._level_draft.source.rows,
+            "cols": self._level_draft.source.cols,
+            "terrain": terrain_documents,
+            "buildable_cells": buildable_cells,
+            "fixed_tracks": [],
+            "actors": actor_documents,
+            "switches": [],
+            "buttons": [],
+            "gates": [],
+            "tunnel_endpoints": [],
+            "rail_inventory": {"total_budget": self._semantic_inventory.value()},
+            "win_condition": {
+                "required_arrivals": arrival_documents,
+                "arrival_order": [],
+                "required_couplings": [],
+            },
+        }
+        try:
+            level = Level.model_validate(document)
+            self._validate_level_grid_dimensions(level)
+        except ValueError as error:
+            self._show_error(f"Could not build semantic level from labels: {error}")
+            return
+        self._level_path = None
+        self._level_editor.setPlainText(level.model_dump_json(indent=2))
+        self._set_validated_level(level, None)
+        self._semantic_status.setText(
+            "Built and validated level from reviewed labels. Actor and goal cells are included "
+            "in the M9 buildable area so the solver can place their rail segments."
+        )
+
+    def _create_level_from_draft(self) -> None:
+        """Create an editable M4 document without guessing unobserved game rules."""
+        if self._level_draft is None:
+            self._show_error(
+                "Run recognition and apply its review decisions before creating a level."
+            )
+            return
+        if not self._level_draft.is_complete:
+            self._show_error(
+                "Resolve every recognition cell before creating a semantic level template."
+            )
+            return
+        template = _semantic_level_template(self._level_draft)
+        self._level_path = None
+        self._level_editor.setPlainText(json.dumps(template, indent=2) + "\n")
+        self._semantic_status.setText(
+            "Created an editable level template. Recognition supplied only terrain labels; add "
+            "actors, buildable cells, fixed-track topology/devices, inventory, and win condition "
+            "before validation and saving level.json."
+        )
 
     def _open_level_dialog(self) -> None:
         """Load an authoritative semantic level into the in-window editor."""
@@ -902,10 +1125,32 @@ class CalibrationWindow(QMainWindow):
         """Read, validate, and display a semantic level without changing its data."""
         try:
             raw_level = path.read_text(encoding="utf-8")
+        except OSError as error:
+            self._show_error(f"Could not load semantic level: {error}")
+            return
+        try:
             level = Level.model_validate_json(raw_level)
             self._validate_level_grid_dimensions(level)
-        except (OSError, ValueError) as error:
-            self._show_error(f"Could not load semantic level: {error}")
+        except ValueError as error:
+            try:
+                draft = LevelDraft.model_validate_json(raw_level)
+            except ValueError:
+                self._show_error(f"Could not load semantic level: {error}")
+                return
+            self._level_draft = draft
+            self._recognition_summary.setText(
+                f"Loaded reviewed recognition draft from {path.name}. Create an editable semantic "
+                "level template below; this file is not itself a level.json."
+            )
+            self._recognition_view.setPlainText(
+                "Loaded draft labels:\n"
+                + "\n".join(
+                    f"({cell.cell.row}, {cell.cell.col}) {cell.label}"
+                    for cell in draft.resolved_cells
+                )
+            )
+            self._refresh_semantic_mapping_form()
+            self._update_semantic_controls()
             return
         self._level_editor.setPlainText(raw_level)
         self._set_validated_level(level, path)
@@ -1222,6 +1467,15 @@ class CalibrationWindow(QMainWindow):
         self._save_report_button.setEnabled(has_report)
         self._save_overrides_button.setEnabled(has_report)
         self._save_draft_button.setEnabled(has_draft)
+        self._build_level_from_labels_button.setEnabled(
+            self._level_draft is not None
+            and self._level_draft.is_complete
+            and bool(self._draft_cells("actor.train"))
+            and bool(self._draft_cells("goal.arrival"))
+        )
+        self._create_level_from_draft_button.setEnabled(
+            self._level_draft is not None and self._level_draft.is_complete
+        )
         self._validate_level_button.setEnabled(has_level_text)
         self._save_level_button.setEnabled(has_level_text)
         self._solve_button.setEnabled(has_level_text)
@@ -1587,6 +1841,7 @@ class CalibrationWindow(QMainWindow):
         self._save_solution_button.setEnabled(False)
         self._solver_trace.clear()
         self._refresh_template_crop_choices()
+        self._refresh_semantic_mapping_form()
         if self._crop_preview is not None:
             self._crop_preview.hide()
         self._update_semantic_controls()
@@ -1722,6 +1977,52 @@ def run_calibration_gui(
     )
     window.show()
     return 0
+
+
+def _cell_document(cell: CellCoord) -> dict[str, int]:
+    """Return one portable coordinate object for a generated level document."""
+    return {"row": cell.row, "col": cell.col}
+
+
+def _semantic_level_template(draft: LevelDraft) -> dict[str, object]:
+    """Build an editable M4 document while retaining only unambiguous terrain labels.
+
+    Recognition cannot establish train direction, rail ports, placeability,
+    inventory, or objectives.  Those fields remain deliberately empty for the
+    reviewer instead of being guessed from image evidence.
+    """
+    terrain: list[dict[str, object]] = []
+    for resolved in draft.resolved_cells:
+        if not resolved.label.startswith("terrain."):
+            continue
+        terrain.append(
+            {
+                "cell": {"row": resolved.cell.row, "col": resolved.cell.col},
+                "kind": resolved.label,
+            }
+        )
+    return {
+        "schema_version": 1,
+        "ruleset_version": "railbound-observed-v1",
+        "id": "reviewed-level",
+        "metadata": {"source": "recognition-review"},
+        "rows": draft.source.rows,
+        "cols": draft.source.cols,
+        "terrain": terrain,
+        "buildable_cells": [],
+        "fixed_tracks": [],
+        "actors": [],
+        "switches": [],
+        "buttons": [],
+        "gates": [],
+        "tunnel_endpoints": [],
+        "rail_inventory": {"total_budget": 0},
+        "win_condition": {
+            "required_arrivals": [],
+            "arrival_order": [],
+            "required_couplings": [],
+        },
+    }
 
 
 def _event_summary(event: SimulationEvent) -> str:
