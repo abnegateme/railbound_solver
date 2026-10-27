@@ -45,8 +45,10 @@ Use the same window's **Review and solve** tab for every completed stage:
 - Open or paste the completed authoritative `level.json`, validate and save
   it. Recognition labels remain evidence rather than simulator input.
 - Open or paste a `placement.json` to inspect its compiled port topology and
-  replay its M6–M7 event trace. The baseline solver can then search the same
-  level, show its verified trace, and save its resulting placement.
+  replay its M6–M7 event trace. The optimized solver can then search the same
+  level, show its verified trace and compact performance summary, and save its
+  resulting placement. Pruning and runtime caching are automatic and add no
+  extra controls.
 
 The **Grid and crops** tab can also export optional PNG crops, a manifest, and
 a contact sheet for batch workflows. No intermediate artifacts are required

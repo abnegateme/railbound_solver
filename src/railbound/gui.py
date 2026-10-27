@@ -471,7 +471,7 @@ class CalibrationWindow(QMainWindow):
         layout.addWidget(self._placement_status)
         layout.addWidget(self._placement_inspection_output)
 
-        layout.addWidget(QLabel("Baseline solver"))
+        layout.addWidget(QLabel("Solver"))
         self._max_placements = QSpinBox()
         self._max_placements.setRange(0, 10_000_000)
         self._max_placements.setValue(10_000)
@@ -1361,6 +1361,10 @@ class CalibrationWindow(QMainWindow):
         if level is None:
             return
         max_rails = self._max_rails.value() if self._limit_rails.isChecked() else None
+        self._solve_button.setEnabled(False)
+        self._solver_status.setText("Searching with automatic safe pruning…")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents()
         try:
             self._solver_result = solve(
                 level,
@@ -1373,6 +1377,9 @@ class CalibrationWindow(QMainWindow):
         except ValueError as error:
             self._show_error(f"Could not solve semantic level: {error}")
             return
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._solve_button.setEnabled(True)
 
         self._save_solution_button.setEnabled(self._solver_result.solved)
         if self._solver_result.placement is not None:
@@ -1387,9 +1394,13 @@ class CalibrationWindow(QMainWindow):
         stats = result.statistics
         lines = [
             f"Status: {result.status.value}",
-            f"Placements considered: {stats.placements_considered}",
-            f"Runtime states visited: {stats.runtime_states_visited}",
-            f"Events emitted: {stats.events_emitted}",
+            "Search: "
+            f"{stats.placements_considered} candidate(s), {stats.simulations} replay(s), "
+            f"{stats.placements_pruned} pruned in {stats.elapsed_seconds:.3f} s",
+            "Optimization: "
+            f"{stats.connectivity_branches_pruned} partial branch(es), "
+            f"{stats.transposition_hits} runtime cache hit(s)",
+            f"Replay: {stats.runtime_states_visited} state(s), {stats.events_emitted} event(s)",
         ]
         if result.solved and result.placement is not None:
             self._solver_status.setText(

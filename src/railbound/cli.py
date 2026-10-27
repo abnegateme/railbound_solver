@@ -414,9 +414,10 @@ def _solve(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -> in
     stats = result.statistics
     print(
         "Searched "
-        f"{stats.placements_considered} placements, "
-        f"{stats.runtime_states_visited} runtime states, and "
-        f"{stats.events_emitted} events."
+        f"{stats.placements_considered} placements with {stats.simulations} replays; "
+        f"pruned {stats.placements_pruned} placements and "
+        f"{stats.connectivity_branches_pruned} partial branches; visited "
+        f"{stats.runtime_states_visited} runtime states in {stats.elapsed_seconds:.3f}s."
     )
     if result.solved:
         if result.placement is None:

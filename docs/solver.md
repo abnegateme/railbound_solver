@@ -1,4 +1,4 @@
-# Baseline solver (M9)
+# Optimized solver (M10)
 
 `solve()` generates legal `RailPlacement` values and replays each one through
 the deterministic simulator. A placement is a solution only when that replay
@@ -48,6 +48,14 @@ same ordered event trace in `result.trace`, and `SearchStats`. When no
 placement can be found, `placement`, `simulation`, and `trace` are empty and
 `status` distinguishes an exhaustive `unsolvable` search from `limit_reached`.
 
+The interactive session enables the M10 search policy automatically. It uses
+forced buildable cells, optimistic port-connectivity pruning, canonical rail
+rotations, deterministic heuristic ordering, and a per-placement runtime-state
+cache. These optimizations can only discard candidates that cannot succeed;
+every reported solution is still replayed by the simulator. The GUI keeps the
+controls unchanged and reports replay, pruning, cache, and elapsed-time totals
+in the result pane.
+
 ## Deterministic candidate order
 
 The baseline enumerator searches zero rails, then one rail, then successively
@@ -57,7 +65,13 @@ Equivalent rotations are omitted: straights use `N` and `E`; crossings use
 `N`. Consequently the first solution has the fewest rails and is stable
 between runs.
 
-`SolverLimits.max_placements` bounds simulation replays,
+`SolverLimits.max_placements` bounds complete candidates considered,
 `SolverLimits.max_rails` bounds placement size, and `SolverLimits.max_ticks`
-bounds each replay. The baseline deliberately has no connectivity pruning,
-state cache, or heuristic ordering; those belong to M10.
+bounds each replay. For measurements or regressions,
+`SolverOptions.baseline()` restores the M9 enumeration and replay policy;
+custom conservative predicates can be supplied through
+`SolverOptions.pruning_predicates`.
+
+`benchmark_search(level, limits)` runs the baseline and optimized policies
+under identical bounds and returns both results plus replay/state reductions.
+Use explicit small limits when benchmarking a large unsolved level.
