@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsView,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -39,8 +40,10 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QStyle,
     QTabWidget,
     QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -61,7 +64,6 @@ from railbound.detection import (
 )
 from railbound.extraction import CellCrop, CellExtractor, CropSpec, render_crop_contact_sheet
 from railbound.geometry import CellCoord, GridGeometry, PixelPoint
-from railbound.grid_io import save_grid
 from railbound.level import Level
 from railbound.level_io import save_level
 from railbound.placement_io import load_placement, save_placement
@@ -186,8 +188,6 @@ class CalibrationWindow(QMainWindow):
         self,
         *,
         image_path: Path | None = None,
-        grid_output: Path | None = None,
-        overlay_output: Path | None = None,
         automatic_detection: bool = True,
     ) -> None:
         super().__init__()
@@ -201,8 +201,6 @@ class CalibrationWindow(QMainWindow):
         self._crop_spec: CropSpec | None = None
         self._contact_sheet: ColorImage | None = None
         self._crop_preview: CropPreviewWindow | None = None
-        self._grid_output = grid_output
-        self._overlay_output = overlay_output
         self._automatic_detection = automatic_detection
         self._detection_candidates: list[CalibrationCandidate] = []
         self._recognition_report: RecognitionReport | None = None
@@ -257,6 +255,8 @@ class CalibrationWindow(QMainWindow):
         calibration_controls.setMinimumWidth(300)
         layout = QVBoxLayout(calibration_controls)
 
+        calibration_group = QGroupBox("Calibration")
+        calibration_layout = QVBoxLayout(calibration_group)
         dimensions = QHBoxLayout()
         dimensions.addWidget(QLabel("Rows"))
         dimensions.addWidget(self._rows)
@@ -264,7 +264,26 @@ class CalibrationWindow(QMainWindow):
         dimensions.addWidget(QLabel("Columns"))
         dimensions.addWidget(self._cols)
         dimensions.addStretch()
-        layout.addLayout(dimensions)
+        calibration_layout.addLayout(dimensions)
+
+        calibration_actions = QHBoxLayout()
+        undo_button = QToolButton()
+        undo_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowBack))
+        undo_button.setToolTip("Undo last grid intersection")
+        undo_button.setAccessibleName("Undo last grid intersection")
+        undo_button.setAutoRaise(True)
+        undo_button.clicked.connect(self._undo_last_point)
+        reset_button = QToolButton()
+        reset_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
+        reset_button.setToolTip("Start calibration over")
+        reset_button.setAccessibleName("Start calibration over")
+        reset_button.setAutoRaise(True)
+        reset_button.clicked.connect(self._reset_points)
+        calibration_actions.addWidget(undo_button)
+        calibration_actions.addWidget(reset_button)
+        calibration_actions.addStretch()
+        calibration_layout.addLayout(calibration_actions)
+        layout.addWidget(calibration_group)
 
         layout.addWidget(QLabel("Cell extraction"))
         self._crop_mode = QComboBox()
@@ -295,15 +314,6 @@ class CalibrationWindow(QMainWindow):
         self._crop_size.valueChanged.connect(self._crop_settings_changed)
         self._cell_mask.toggled.connect(self._crop_settings_changed)
 
-        undo_button = QPushButton("Undo last point")
-        undo_button.clicked.connect(self._undo_last_point)
-        reset_button = QPushButton("Start over")
-        reset_button.clicked.connect(self._reset_points)
-        save_button = QPushButton("Save calibration…")
-        save_button.clicked.connect(self._save_calibration)
-        layout.addWidget(undo_button)
-        layout.addWidget(reset_button)
-        layout.addWidget(save_button)
         layout.addStretch()
 
         activity = QWidget()
@@ -387,7 +397,7 @@ class CalibrationWindow(QMainWindow):
         self._recognize_button.clicked.connect(self._recognize_crops)
         catalog_hint = QLabel(
             "Create a catalog from selected crops or open one with a top-level `templates` list; "
-            "grid.json is calibration data, not a recognition catalog."
+            "a crop manifest or level file is not a recognition catalog."
         )
         catalog_hint.setWordWrap(True)
         self._recognition_summary = QLabel()
@@ -583,8 +593,8 @@ class CalibrationWindow(QMainWindow):
             first_error = error.errors()[0]["msg"]
             self._show_error(
                 f"{path.name} is not a valid template catalog. Choose the labelled catalog JSON "
-                "with a top-level `templates` list, not grid.json, a crop manifest, or a level "
-                f"file. First problem: {first_error}"
+                "with a top-level `templates` list, not a crop manifest or level file. "
+                f"First problem: {first_error}"
             )
             return
         except (OSError, ValueError) as error:
@@ -1870,22 +1880,6 @@ class CalibrationWindow(QMainWindow):
             )
         self._canvas.set_image(_bgr_to_qimage(preview))
 
-    def _save_calibration(self) -> None:
-        if self._image is None or self._grid is None:
-            self._show_error("Select a valid grid before saving.")
-            return
-        output_paths = self._output_paths()
-        if output_paths is None:
-            return
-        grid_path, overlay_path = output_paths
-        overlay = render_grid_overlay(self._image, self._grid)
-        overlay_path.parent.mkdir(parents=True, exist_ok=True)
-        if not cv2.imwrite(str(overlay_path), overlay):
-            self._show_error(f"Could not write overlay image: {overlay_path}")
-            return
-        save_grid(self._grid, grid_path)
-        self._log_activity(f"Saved {grid_path} and {overlay_path}.")
-
     @property
     def extracted_crops(self) -> tuple[CellCrop, ...]:
         """Return the current in-memory cells for future recognition stages."""
@@ -2013,23 +2007,6 @@ class CalibrationWindow(QMainWindow):
         self._crop_preview.raise_()
         self._crop_preview.activateWindow()
 
-    def _output_paths(self) -> tuple[Path, Path] | None:
-        if self._grid_output is not None and self._overlay_output is not None:
-            return self._grid_output, self._overlay_output
-        suggested = (
-            self._image_path.with_name("grid.json") if self._image_path else Path("grid.json")
-        )
-        selected, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save calibrated grid",
-            str(suggested),
-            "Grid JSON (*.json)",
-        )
-        if not selected:
-            return None
-        grid_path = Path(selected).with_suffix(".json")
-        return grid_path, grid_path.with_name("annotated_grid.png")
-
     def _show_error(self, message: str) -> None:
         self._log_activity(f"Error: {message}")
         QMessageBox.warning(self, "Railbound Solver", message)
@@ -2045,8 +2022,6 @@ class CalibrationWindow(QMainWindow):
 def run_calibration_gui(
     *,
     image_path: Path | None,
-    grid_output: Path | None,
-    overlay_output: Path | None,
     automatic_detection: bool = True,
 ) -> int:
     """Open the primary native parse, review, and solve window."""
@@ -2055,8 +2030,6 @@ def run_calibration_gui(
         application = QApplication([])
         window = CalibrationWindow(
             image_path=image_path,
-            grid_output=grid_output,
-            overlay_output=overlay_output,
             automatic_detection=automatic_detection,
         )
         window.show()
@@ -2064,8 +2037,6 @@ def run_calibration_gui(
 
     window = CalibrationWindow(
         image_path=image_path,
-        grid_output=grid_output,
-        overlay_output=overlay_output,
         automatic_detection=automatic_detection,
     )
     window.show()

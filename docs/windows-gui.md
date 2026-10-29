@@ -26,9 +26,9 @@ screenshot is fitted automatically whenever the window changes size.
 The lower part of the side panel, visible below both tabs, keeps an activity log
 and a current **Next step** recommendation. It occupies roughly one fifth of
 the panel and includes manual calibration guidance when automatic detection
-cannot establish a reliable grid. Saving writes `grid.json` and
-`annotated_grid.png`; **Extract cells in memory** opens the crop preview for the
-next stage.
+cannot establish a reliable grid. GUI calibration belongs to the current
+screenshot session and is consumed directly by **Extract cells in memory**; it
+is not saved separately.
 
 Use the same window's **Review and solve** tab for every completed stage:
 
@@ -63,8 +63,7 @@ Use the same window's **Review and solve** tab for every completed stage:
 The **Grid and crops** tab can also export optional PNG crops, a manifest, and
 a contact sheet for batch workflows. No intermediate artifacts are required
 for the primary interactive path. A template catalog has a top-level
-`templates` list; do not select calibrated `grid.json` or a crop manifest as
-its catalog.
+`templates` list; do not select a crop manifest or level file as its catalog.
 
 The host environment is only a local GUI runtime, not an installer. Its
 desktop access must remain outside the devcontainer.

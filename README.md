@@ -1,9 +1,9 @@
 # Railbound Solver
 
-Railbound Solver calibrates screenshot grids, extracts cells, produces
-reviewable recognition evidence, models semantic levels, compiles rail
-topology, replays observed mechanics, and searches small levels for verified
-rail placements.
+Railbound Solver provides an interactive workflow that calibrates screenshot
+grids, extracts cells, produces reviewable recognition evidence, models
+semantic levels, replays observed mechanics, and searches small levels for
+verified rail placements.
 
 ## Documentation
 
@@ -11,9 +11,6 @@ rail placements.
 | --- | --- |
 | Development environment, checks, and release image | [Development](docs/development.md) |
 | Native Windows calibration and solver workflow | [Windows GUI](docs/windows-gui.md) |
-| Manual affine grid calibration (M1) | [Calibration](docs/calibration.md) |
-| Normalized cell extraction (M2) | [Extraction](docs/extraction.md) |
-| Automatic grid proposals (M3) | [Grid detection](docs/grid-detection.md) |
 | Authoritative semantic levels (M4) | [Level schema](docs/level-schema.md) |
 | Static rail placement and port topology (M5) | [Board topology](docs/board-topology.md) |
 | Deterministic replay and devices (M6–M7) | [Simulation](docs/static-simulation.md) |

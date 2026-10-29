@@ -30,4 +30,4 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Railbound GUI environment is ready: $venvPython"
-Write-Host "Run: & '$venvPython' -m railbound calibrate --interactive --image data\\Railbound-1-13.PNG"
+Write-Host "Run: & '$venvPython' -m railbound interactive --image data\\Railbound-1-13.PNG"

@@ -55,7 +55,8 @@ report and never converted automatically.
 
 ## Run recognition
 
-First extract crops as normal, then provide the catalog:
+First export the in-memory crops and manifest from the GUI, then provide the
+catalog:
 
 ```bash
 python3 -m railbound recognize \
