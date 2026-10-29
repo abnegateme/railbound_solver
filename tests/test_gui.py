@@ -35,13 +35,43 @@ def test_interactive_gui_adopts_a_confident_detection_as_editable_calibration() 
     window = CalibrationWindow(automatic_detection=True)
     window._image = _lattice_image()
 
-    window._propose_grid()
+    window._detect_grid()
 
     assert application is not None
     assert window._grid is not None
     assert window._grid.calibration.method == "automatic_edge_lattice"
     assert len(window._points) == 4
     assert "Accepted proposal" in window._status.text()
+    window.close()
+
+
+def test_gui_automatically_detects_grid_when_loading_a_screenshot(tmp_path: Path) -> None:
+    application = QApplication.instance() or QApplication([])
+    image_path = tmp_path / "lattice.png"
+    assert cv2.imwrite(str(image_path), _lattice_image())
+
+    window = CalibrationWindow(image_path=image_path)
+
+    assert application is not None
+    assert window._grid is not None
+    assert (window._rows.value(), window._cols.value()) == (5, 6)
+    assert "Accepted proposal" in window._status.text()
+    window.close()
+
+
+def test_gui_keeps_compact_default_dimensions_when_detection_fails(tmp_path: Path) -> None:
+    application = QApplication.instance() or QApplication([])
+    image_path = tmp_path / "blank.png"
+    assert cv2.imwrite(str(image_path), np.zeros((200, 300, 3), dtype=np.uint8))
+
+    window = CalibrationWindow(image_path=image_path)
+
+    assert application is not None
+    assert window._grid is None
+    assert (window._rows.value(), window._cols.value()) == (8, 10)
+    assert window._rows.width() == 72
+    assert window._cols.width() == 72
+    assert "current 8 rows × 10 columns are unchanged" in window._status.text()
     window.close()
 
 

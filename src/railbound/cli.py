@@ -240,7 +240,7 @@ def _calibrate(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -
 
 
 def _interactive_calibrate(arguments: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
-    return _interactive(arguments, parser, automatic_detection=False)
+    return _interactive(arguments, parser, automatic_detection=True)
 
 
 def _interactive(

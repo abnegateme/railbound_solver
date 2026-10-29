@@ -14,11 +14,15 @@ Start the primary interactive session:
 .\.venv-gui\Scripts\python.exe -m railbound interactive --image data\Railbound-1-13.PNG
 ```
 
-The window accepts a proposal at confidence `0.70` or higher. Otherwise click
-the centres of `(0, 0)`, `(0, 1)`, `(1, 0)`, and the bottom-right cell, in that
-order. Extra labelled-cell clicks refine the affine fit; **Fit image** resets
-zoom. Saving writes `grid.json` and `annotated_grid.png`; **Extract cells in
-memory** opens the crop preview for the next stage.
+Every screenshot is inspected when it is loaded, including an image supplied
+at startup. The window applies a grid proposal at confidence `0.70` or higher
+and fills its detected row and column counts. If no reliable grid is found, the
+compact controls keep their `8 × 10` defaults and the status message asks for
+manual dimensions and the centres of `(0, 0)`, `(0, 1)`, `(1, 0)`, and the
+bottom-right cell, in that order. Extra labelled-cell clicks refine the affine
+fit; **Fit image** resets zoom. Saving writes `grid.json` and
+`annotated_grid.png`; **Extract cells in memory** opens the crop preview for
+the next stage.
 
 Use the same window's **Review and solve** tab for every completed stage:
 

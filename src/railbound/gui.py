@@ -88,6 +88,9 @@ from railbound.topology import (
 
 _POINT_COLORS = ((255, 0, 255), (0, 220, 0), (0, 0, 255), (0, 165, 255))
 _REFERENCE_POINT_COLOR = (255, 255, 0)
+_DEFAULT_ROWS = 8
+_DEFAULT_COLS = 10
+_DIMENSION_CONTROL_WIDTH = 72
 _POINT_LABELS = (
     "1. Center of the upper-left cell (0, 0)",
     "2. Center of the cell immediately to its right (0, 1)",
@@ -168,7 +171,7 @@ class CalibrationWindow(QMainWindow):
         image_path: Path | None = None,
         grid_output: Path | None = None,
         overlay_output: Path | None = None,
-        automatic_detection: bool = False,
+        automatic_detection: bool = True,
     ) -> None:
         super().__init__()
         self._image: ColorImage | None = None
@@ -185,7 +188,6 @@ class CalibrationWindow(QMainWindow):
         self._overlay_output = overlay_output
         self._automatic_detection = automatic_detection
         self._detection_candidates: list[CalibrationCandidate] = []
-        self._detect_button: QPushButton | None = None
         self._recognition_report: RecognitionReport | None = None
         self._level_draft: LevelDraft | None = None
         self._actor_direction_selectors: dict[tuple[int, int], QComboBox] = {}
@@ -209,8 +211,10 @@ class CalibrationWindow(QMainWindow):
         self._cols = QSpinBox()
         for control in (self._rows, self._cols):
             control.setRange(2, 200)
-        self._rows.setValue(8)
-        self._cols.setValue(10)
+        self._rows.setFixedWidth(_DIMENSION_CONTROL_WIDTH)
+        self._cols.setFixedWidth(_DIMENSION_CONTROL_WIDTH)
+        self._rows.setValue(_DEFAULT_ROWS)
+        self._cols.setValue(_DEFAULT_COLS)
         for control in (self._rows, self._cols):
             control.valueChanged.connect(self._dimensions_changed)
         self._instruction = QLabel()
@@ -237,17 +241,18 @@ class CalibrationWindow(QMainWindow):
         calibration_controls = QWidget()
         calibration_controls.setMinimumWidth(300)
         layout = QVBoxLayout(calibration_controls)
+
+        dimensions = QHBoxLayout()
+        dimensions.addWidget(QLabel("Rows"))
+        dimensions.addWidget(self._rows)
+        dimensions.addSpacing(12)
+        dimensions.addWidget(QLabel("Columns"))
+        dimensions.addWidget(self._cols)
+        dimensions.addStretch()
+        layout.addLayout(dimensions)
+
         layout.addWidget(QLabel("Click the marked cell centers in order."))
         layout.addWidget(self._instruction)
-        form = QFormLayout()
-        form.addRow("Rows", self._rows)
-        form.addRow("Columns", self._cols)
-        layout.addLayout(form)
-
-        if self._automatic_detection:
-            self._detect_button = QPushButton("Propose grid from visible edges")
-            self._detect_button.clicked.connect(self._propose_grid)
-            layout.addWidget(self._detect_button)
 
         layout.addWidget(QLabel("Cell extraction"))
         self._crop_mode = QComboBox()
@@ -1504,11 +1509,21 @@ class CalibrationWindow(QMainWindow):
         self._image = image
         self._image_path = path
         self._image_hash = image_sha256(path)
+        self._restore_default_dimensions()
         self._reset_points()
         self._canvas.fit_in_view()
         self._status.setText(f"Loaded {path.name} ({image.shape[1]} × {image.shape[0]} px)")
         if self._automatic_detection:
-            self._propose_grid()
+            self._detect_grid()
+
+    def _restore_default_dimensions(self) -> None:
+        """Restore the manual fallback before analysing a newly loaded screenshot."""
+        self._rows.blockSignals(True)
+        self._cols.blockSignals(True)
+        self._rows.setValue(_DEFAULT_ROWS)
+        self._cols.setValue(_DEFAULT_COLS)
+        self._rows.blockSignals(False)
+        self._cols.blockSignals(False)
 
     def _open_image_dialog(self) -> None:
         selected, _ = QFileDialog.getOpenFileName(
@@ -1554,10 +1569,10 @@ class CalibrationWindow(QMainWindow):
         self._detection_candidates.clear()
         self._update_grid_from_dimensions()
 
-    def _propose_grid(self) -> None:
-        """Propose and visibly score a grid, retaining manual calibration as fallback."""
+    def _detect_grid(self) -> None:
+        """Detect and visibly score a grid, retaining manual calibration as fallback."""
         if self._image is None:
-            self._show_error("Open a screenshot before proposing a grid.")
+            self._show_error("Open a screenshot before detecting a grid.")
             return
         self._clear_extraction()
         try:
@@ -1575,7 +1590,11 @@ class CalibrationWindow(QMainWindow):
             self._points.clear()
             self._reference_points.clear()
             self._status.setText(
-                "No regular grid was detected. Select the four manual calibration points."
+                "Could not determine a regular grid or its dimensions automatically. "
+                f"The current {self._rows.value()} rows × {self._cols.value()} columns are "
+                f"unchanged (a new image starts with the {_DEFAULT_ROWS} × {_DEFAULT_COLS} "
+                "defaults). "
+                "Enter the dimensions if needed, then select the four manual calibration points."
             )
             self._refresh_canvas()
             self._update_extraction_controls()
@@ -1588,8 +1607,9 @@ class CalibrationWindow(QMainWindow):
             self._points.clear()
             self._reference_points.clear()
             self._status.setText(
-                f"Best proposal has confidence {candidate.confidence:.2f}; "
-                "manual calibration is required below 0.70."
+                f"The best automatic grid proposal has confidence {candidate.confidence:.2f}, "
+                "so it was not applied below 0.70. The current dimensions are unchanged; "
+                "enter them if needed, then select the four manual calibration points."
             )
             self._refresh_canvas()
             self._update_extraction_controls()
@@ -1832,8 +1852,6 @@ class CalibrationWindow(QMainWindow):
         self._extract_button.setEnabled(ready)
         self._show_crops_button.setEnabled(bool(self._crops))
         self._export_crops_button.setEnabled(bool(self._crops))
-        if self._detect_button is not None:
-            self._detect_button.setEnabled(self._image is not None)
 
     def _clear_extraction(self) -> None:
         had_extraction = self._contact_sheet is not None
@@ -1965,7 +1983,7 @@ def run_calibration_gui(
     image_path: Path | None,
     grid_output: Path | None,
     overlay_output: Path | None,
-    automatic_detection: bool = False,
+    automatic_detection: bool = True,
 ) -> int:
     """Open the primary native parse, review, and solve window."""
     application = QApplication.instance()
