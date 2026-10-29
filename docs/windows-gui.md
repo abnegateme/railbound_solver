@@ -20,9 +20,9 @@ and fills its detected row and column counts. If no reliable grid is found, the
 compact controls keep their `8 × 10` defaults and the status message asks for
 manual dimensions and the centres of `(0, 0)`, `(0, 1)`, `(1, 0)`, and the
 bottom-right cell, in that order. Extra labelled-cell clicks refine the affine
-fit; **Fit image** resets zoom. Saving writes `grid.json` and
-`annotated_grid.png`; **Extract cells in memory** opens the crop preview for
-the next stage.
+fit. The screenshot is fitted automatically whenever the window changes size.
+Saving writes `grid.json` and `annotated_grid.png`; **Extract cells in memory**
+opens the crop preview for the next stage.
 
 Use the same window's **Review and solve** tab for every completed stage:
 

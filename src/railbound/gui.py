@@ -9,7 +9,16 @@ from typing import Literal, cast
 import cv2
 from pydantic import TypeAdapter, ValidationError
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QAction, QColor, QImage, QMouseEvent, QPainter, QPixmap, QWheelEvent
+from PySide6.QtGui import (
+    QAction,
+    QColor,
+    QImage,
+    QMouseEvent,
+    QPainter,
+    QPixmap,
+    QResizeEvent,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -123,6 +132,11 @@ class CalibrationCanvas(QGraphicsView):
         if not self._image_item.pixmap().isNull():
             self.fitInView(self._image_item, Qt.AspectRatioMode.KeepAspectRatio)
 
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        """Keep the complete image fitted when the available canvas size changes."""
+        super().resizeEvent(event)
+        self.fit_in_view()
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
             position = self.mapToScene(event.position().toPoint())
@@ -231,11 +245,8 @@ class CalibrationWindow(QMainWindow):
     def _build_ui(self) -> None:
         open_action = QAction("Open screenshot…", self)
         open_action.triggered.connect(self._open_image_dialog)
-        fit_action = QAction("Fit image", self)
-        fit_action.triggered.connect(self._canvas.fit_in_view)
         toolbar = QToolBar("Calibration", self)
         toolbar.addAction(open_action)
-        toolbar.addAction(fit_action)
         self.addToolBar(toolbar)
 
         calibration_controls = QWidget()
