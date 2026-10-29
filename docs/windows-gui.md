@@ -21,8 +21,12 @@ compact controls keep their `8 × 10` defaults and the status message asks for
 manual dimensions and the centres of `(0, 0)`, `(0, 1)`, `(1, 0)`, and the
 bottom-right cell, in that order. Extra labelled-cell clicks refine the affine
 fit. The screenshot is fitted automatically whenever the window changes size.
-Saving writes `grid.json` and `annotated_grid.png`; **Extract cells in memory**
-opens the crop preview for the next stage.
+The lower part of the side panel, visible below both tabs, keeps an activity log
+and a current **Next step** recommendation. It occupies roughly one fifth of
+the panel and includes manual calibration guidance when automatic detection
+cannot establish a reliable grid. Saving writes `grid.json` and
+`annotated_grid.png`; **Extract cells in memory** opens the crop preview for the
+next stage.
 
 Use the same window's **Review and solve** tab for every completed stage:
 

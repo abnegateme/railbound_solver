@@ -101,10 +101,10 @@ _DEFAULT_ROWS = 8
 _DEFAULT_COLS = 10
 _DIMENSION_CONTROL_WIDTH = 72
 _POINT_LABELS = (
-    "1. Center of the upper-left cell (0, 0)",
-    "2. Center of the cell immediately to its right (0, 1)",
-    "3. Center of the cell immediately below it (1, 0)",
-    "4. Center of the bottom-right cell",
+    "Click the center of the upper-left cell (0, 0).",
+    "Click the center of the cell immediately to its right (0, 1).",
+    "Click the center of the cell immediately below it (1, 0).",
+    "Click the center of the bottom-right cell.",
 )
 _OVERRIDES_ADAPTER = TypeAdapter(tuple[RecognitionOverride, ...])
 
@@ -233,8 +233,9 @@ class CalibrationWindow(QMainWindow):
             control.valueChanged.connect(self._dimensions_changed)
         self._instruction = QLabel()
         self._instruction.setWordWrap(True)
-        self._status = QLabel()
-        self._status.setWordWrap(True)
+        self._activity_log = QPlainTextEdit()
+        self._activity_log.setReadOnly(True)
+        self._activity_log.setPlaceholderText("Screenshot activity will appear here.")
         self._build_ui()
         self._update_semantic_controls()
         if image_path is not None:
@@ -261,9 +262,6 @@ class CalibrationWindow(QMainWindow):
         dimensions.addWidget(self._cols)
         dimensions.addStretch()
         layout.addLayout(dimensions)
-
-        layout.addWidget(QLabel("Click the marked cell centers in order."))
-        layout.addWidget(self._instruction)
 
         layout.addWidget(QLabel("Cell extraction"))
         self._crop_mode = QComboBox()
@@ -303,17 +301,29 @@ class CalibrationWindow(QMainWindow):
         layout.addWidget(undo_button)
         layout.addWidget(reset_button)
         layout.addWidget(save_button)
-        layout.addWidget(self._status)
         layout.addStretch()
+
+        activity = QWidget()
+        activity_layout = QVBoxLayout(activity)
+        activity_layout.setContentsMargins(9, 0, 9, 9)
+        activity_layout.addWidget(QLabel("Activity and next step"))
+        activity_layout.addWidget(self._activity_log, stretch=1)
+        activity_layout.addWidget(self._instruction)
 
         content = QWidget()
         content_layout = QHBoxLayout(content)
         content_layout.addWidget(self._canvas, stretch=1)
         tabs = QTabWidget()
-        tabs.setMinimumWidth(360)
         tabs.addTab(calibration_controls, "Grid and crops")
         tabs.addTab(self._build_review_and_solver_tab(), "Review and solve")
-        content_layout.addWidget(tabs)
+
+        sidebar = QWidget()
+        sidebar.setMinimumWidth(360)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(0, 0, 0, 0)
+        sidebar_layout.addWidget(tabs, stretch=4)
+        sidebar_layout.addWidget(activity, stretch=1)
+        content_layout.addWidget(sidebar)
         self.setCentralWidget(content)
         self._update_extraction_controls()
 
@@ -1511,6 +1521,7 @@ class CalibrationWindow(QMainWindow):
         self._save_placement_button.setEnabled(has_level_text and has_placement_text)
         self._inspect_topology_button.setEnabled(has_level_text and has_placement_text)
         self._replay_placement_button.setEnabled(has_level_text and has_placement_text)
+        self._update_instruction()
 
     def load_image(self, path: Path) -> None:
         image = cast(ColorImage | None, cv2.imread(str(path), cv2.IMREAD_COLOR))
@@ -1523,7 +1534,7 @@ class CalibrationWindow(QMainWindow):
         self._restore_default_dimensions()
         self._reset_points()
         self._canvas.fit_in_view()
-        self._status.setText(f"Loaded {path.name} ({image.shape[1]} × {image.shape[0]} px)")
+        self._log_activity(f"Loaded {path.name} ({image.shape[1]} × {image.shape[0]} px).")
         if self._automatic_detection:
             self._detect_grid()
 
@@ -1600,12 +1611,11 @@ class CalibrationWindow(QMainWindow):
             self._grid = None
             self._points.clear()
             self._reference_points.clear()
-            self._status.setText(
+            self._log_activity(
                 "Could not determine a regular grid or its dimensions automatically. "
                 f"The current {self._rows.value()} rows × {self._cols.value()} columns are "
                 f"unchanged (a new image starts with the {_DEFAULT_ROWS} × {_DEFAULT_COLS} "
-                "defaults). "
-                "Enter the dimensions if needed, then select the four manual calibration points."
+                "defaults)."
             )
             self._refresh_canvas()
             self._update_extraction_controls()
@@ -1617,10 +1627,9 @@ class CalibrationWindow(QMainWindow):
             self._grid = None
             self._points.clear()
             self._reference_points.clear()
-            self._status.setText(
+            self._log_activity(
                 f"The best automatic grid proposal has confidence {candidate.confidence:.2f}, "
-                "so it was not applied below 0.70. The current dimensions are unchanged; "
-                "enter them if needed, then select the four manual calibration points."
+                "so it was not applied below 0.70. The current dimensions are unchanged."
             )
             self._refresh_canvas()
             self._update_extraction_controls()
@@ -1628,11 +1637,10 @@ class CalibrationWindow(QMainWindow):
             return
 
         self._adopt_detection(candidate)
-        self._status.setText(
+        self._log_activity(
             f"Accepted proposal 1 of {len(candidates)}: {candidate.grid.rows} rows × "
             f"{candidate.grid.cols} columns, confidence {candidate.confidence:.2f}, "
-            f"RMS error {candidate.residual_rms_px:.2f} px. "
-            "Click labeled cell centers to refine it manually."
+            f"RMS error {candidate.residual_rms_px:.2f} px."
         )
         self._refresh_canvas()
         self._update_extraction_controls()
@@ -1671,8 +1679,10 @@ class CalibrationWindow(QMainWindow):
             )
         except ValueError as error:
             self._grid = None
-            self._status.setText(f"Choose the fourth point again: {error}")
+            self._points.pop()
+            self._log_activity(f"Could not use the fourth point: {error}")
             self._update_extraction_controls()
+            self._update_instruction()
             return
 
         self._rows.blockSignals(True)
@@ -1683,10 +1693,9 @@ class CalibrationWindow(QMainWindow):
         self._cols.blockSignals(False)
         self._grid = grid
         self._update_extraction_controls()
-        self._status.setText(
+        self._log_activity(
             f"Detected {grid.rows} rows × {grid.cols} columns from 4 references; "
-            f"RMS error {grid.calibration.residual_rms_px:.2f} px. "
-            "Click any labeled cell center to add another reference."
+            f"RMS error {grid.calibration.residual_rms_px:.2f} px."
         )
 
     def _dimensions_changed(self) -> None:
@@ -1711,7 +1720,7 @@ class CalibrationWindow(QMainWindow):
                     control_points=self._control_points(),
                     image_sha256=self._image_hash,
                 )
-                self._status.setText(
+                self._log_activity(
                     f"Fitted {len(self._control_points())} references; "
                     f"RMS error {self._grid.calibration.residual_rms_px:.2f} px, "
                     f"max {self._grid.calibration.residual_max_px:.2f} px."
@@ -1729,9 +1738,10 @@ class CalibrationWindow(QMainWindow):
                 )
         except ValueError as error:
             self._grid = None
-            self._status.setText(str(error))
+            self._log_activity(f"Could not fit the grid: {error}")
         self._refresh_canvas()
         self._update_extraction_controls()
+        self._update_instruction()
 
     def _undo_last_point(self) -> None:
         self._detection_candidates.clear()
@@ -1755,14 +1765,32 @@ class CalibrationWindow(QMainWindow):
 
     def _update_instruction(self) -> None:
         if self._image is None:
-            self._instruction.setText("Open a screenshot to begin.")
+            next_step = "Open a screenshot to begin."
+        elif self._crops:
+            if not self._catalog_templates:
+                next_step = "Open Review and solve, then create or load a template catalog."
+            elif self._recognition_report is None:
+                next_step = "Run recognition for the extracted cells with the loaded catalog."
+            elif self._level_draft is not None and not self._level_draft.is_complete:
+                next_step = "Review uncertain cells and apply recognition overrides."
+            else:
+                next_step = "Build and validate the semantic level from the reviewed labels."
         elif len(self._points) < len(_POINT_LABELS):
-            self._instruction.setText(_POINT_LABELS[len(self._points)])
+            if not self._points:
+                next_step = (
+                    "Confirm the row and column counts above, then click the center of the "
+                    "upper-left cell (0, 0)."
+                )
+            else:
+                next_step = _POINT_LABELS[len(self._points)]
+        elif self._grid is None:
+            next_step = "Adjust the dimensions or undo the last reference point and try again."
         else:
-            self._instruction.setText(
-                "Grid is fitted. Click any labeled cell center to add a reference point, "
-                "extract cells in memory, then review and solve in this window."
+            next_step = (
+                "Review the fitted grid, optionally add a labeled cell reference, "
+                "then extract the cells in memory."
             )
+        self._instruction.setText(f"Next step: {next_step}")
 
     def _control_points(self) -> tuple[GridCalibrationPoint, ...]:
         if len(self._points) < 3:
@@ -1840,7 +1868,7 @@ class CalibrationWindow(QMainWindow):
             self._show_error(f"Could not write overlay image: {overlay_path}")
             return
         save_grid(self._grid, grid_path)
-        self._status.setText(f"Saved {grid_path}\nSaved {overlay_path}")
+        self._log_activity(f"Saved {grid_path} and {overlay_path}.")
 
     @property
     def extracted_crops(self) -> tuple[CellCrop, ...]:
@@ -1885,6 +1913,7 @@ class CalibrationWindow(QMainWindow):
         if self._crop_preview is not None:
             self._crop_preview.hide()
         self._update_semantic_controls()
+        self._update_instruction()
 
     def _extract_cells(self) -> None:
         if self._image is None or self._grid is None:
@@ -1916,9 +1945,10 @@ class CalibrationWindow(QMainWindow):
             f"Extracted {len(crops)} cells in memory ({spec.mode}, {spec.output_size} × "
             f"{spec.output_size} px). No files were written."
         )
-        self._status.setText("Grid calibrated and cells extracted in memory.")
+        self._log_activity("Grid calibrated and cells extracted in memory.")
         self._update_extraction_controls()
         self._update_semantic_controls()
+        self._update_instruction()
         self._show_crop_preview()
 
     def _export_crops(self) -> None:
@@ -1985,8 +2015,15 @@ class CalibrationWindow(QMainWindow):
         return grid_path, grid_path.with_name("annotated_grid.png")
 
     def _show_error(self, message: str) -> None:
-        self._status.setText(message)
+        self._log_activity(f"Error: {message}")
         QMessageBox.warning(self, "Railbound Solver", message)
+
+    def _log_activity(self, message: str) -> None:
+        """Append one concise event to the persistent sidebar activity log."""
+        if self._activity_log.toPlainText():
+            self._activity_log.appendPlainText("")
+        self._activity_log.appendPlainText(message.strip())
+        self._activity_log.ensureCursorVisible()
 
 
 def run_calibration_gui(
