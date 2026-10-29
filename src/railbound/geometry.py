@@ -59,7 +59,7 @@ class CellCoord(_FrozenModel):
 
 
 class GridCalibrationPoint(_FrozenModel):
-    """A manually selected cell center with its semantic grid coordinate."""
+    """An integral grid reference interpreted according to the calibration method."""
 
     cell: CellCoord
     pixel: PixelPoint
@@ -81,6 +81,7 @@ class GridCalibration(_FrozenModel):
     method: Literal[
         "manual_three_point_affine",
         "manual_multi_point_affine",
+        "manual_intersection_affine",
         "automatic_edge_lattice",
     ] = "manual_three_point_affine"
     residual_rms_px: Annotated[float, Field(ge=0.0)] = 0.0

@@ -17,10 +17,12 @@ Start the primary interactive session:
 Every screenshot is inspected when it is loaded, including an image supplied
 at startup. The window applies a grid proposal at confidence `0.70` or higher
 and fills its detected row and column counts. If no reliable grid is found, the
-compact controls keep their `8 × 10` defaults and the status message asks for
-manual dimensions and the centres of `(0, 0)`, `(0, 1)`, `(1, 0)`, and the
-bottom-right cell, in that order. Extra labelled-cell clicks refine the affine
-fit. The screenshot is fitted automatically whenever the window changes size.
+compact controls keep their `8 × 10` defaults and the next-step guidance asks
+for manual dimensions and four visible grid intersections: the upper-left
+corner, its adjacent intersections to the right and below, and the outer
+bottom-right corner. Extra intersection clicks refine the affine fit. The
+screenshot is fitted automatically whenever the window changes size.
+
 The lower part of the side panel, visible below both tabs, keeps an activity log
 and a current **Next step** recommendation. It occupies roughly one fifth of
 the panel and includes manual calibration guidance when automatic detection

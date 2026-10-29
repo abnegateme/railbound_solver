@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from math import floor, hypot
 from pathlib import Path
 from typing import Literal, cast
 
@@ -45,9 +46,10 @@ from PySide6.QtWidgets import (
 )
 
 from railbound.calibration import (
-    grid_from_control_points,
-    grid_from_four_points,
-    grid_from_three_points,
+    GridIntersectionPoint,
+    grid_from_four_intersections,
+    grid_from_intersection_points,
+    grid_from_three_intersections,
     image_sha256,
 )
 from railbound.crop_io import write_crop_set
@@ -58,7 +60,7 @@ from railbound.detection import (
     render_detection_overlay,
 )
 from railbound.extraction import CellCrop, CellExtractor, CropSpec, render_crop_contact_sheet
-from railbound.geometry import CellCoord, GridCalibrationPoint, GridGeometry, PixelPoint
+from railbound.geometry import CellCoord, GridGeometry, PixelPoint
 from railbound.grid_io import save_grid
 from railbound.level import Level
 from railbound.level_io import save_level
@@ -100,11 +102,12 @@ _REFERENCE_POINT_COLOR = (255, 255, 0)
 _DEFAULT_ROWS = 8
 _DEFAULT_COLS = 10
 _DIMENSION_CONTROL_WIDTH = 72
+_INTERSECTION_SELECTION_MAX_AXIS_FRACTION = 0.4
 _POINT_LABELS = (
-    "Click the center of the upper-left cell (0, 0).",
-    "Click the center of the cell immediately to its right (0, 1).",
-    "Click the center of the cell immediately below it (1, 0).",
-    "Click the center of the bottom-right cell.",
+    "Click the upper-left grid intersection.",
+    "Click the adjacent grid intersection to its right.",
+    "Click the adjacent grid intersection below it.",
+    "Click the outer bottom-right grid intersection.",
 )
 _OVERRIDES_ADAPTER = TypeAdapter(tuple[RecognitionOverride, ...])
 
@@ -192,7 +195,7 @@ class CalibrationWindow(QMainWindow):
         self._image_path: Path | None = None
         self._image_hash: str | None = None
         self._points: list[PixelPoint] = []
-        self._reference_points: list[GridCalibrationPoint] = []
+        self._reference_points: list[GridIntersectionPoint] = []
         self._grid: GridGeometry | None = None
         self._crops: list[CellCrop] = []
         self._crop_spec: CropSpec | None = None
@@ -1566,7 +1569,7 @@ class CalibrationWindow(QMainWindow):
             self._detection_candidates.clear()
             self._points.append(point)
             if len(self._points) == len(_POINT_LABELS):
-                self._derive_dimensions_from_last_cell()
+                self._derive_dimensions_from_outer_intersection()
             else:
                 self._update_grid_from_dimensions()
         else:
@@ -1576,18 +1579,30 @@ class CalibrationWindow(QMainWindow):
 
     def _add_reference_point(self, point: PixelPoint) -> None:
         if self._grid is None:
-            self._show_error("Finish the first four points before adding a reference cell.")
+            self._show_error("Finish the first four intersections before adding a reference.")
             return
-        nearest = self._grid.nearest_cell(point.x, point.y)
-        if not nearest.in_bounds:
-            self._show_error("Choose a labeled cell inside the grid.")
+        continuous = self._grid.pixel_to_grid(point.x, point.y)
+        row = floor(continuous.row + 1.0)
+        col = floor(continuous.col + 1.0)
+        if not 0 <= row <= self._grid.rows or not 0 <= col <= self._grid.cols:
+            self._show_error("Choose a visible grid intersection on the board.")
             return
-        if any(control.cell == nearest.cell for control in self._control_points()):
-            self._show_error(
-                f"Cell ({nearest.cell.row}, {nearest.cell.col}) is already a reference."
-            )
+        expected = self._grid.grid_to_pixel(row - 0.5, col - 0.5)
+        axis_length = min(
+            hypot(self._grid.col_axis_px.x, self._grid.col_axis_px.y),
+            hypot(self._grid.row_axis_px.x, self._grid.row_axis_px.y),
+        )
+        distance = hypot(point.x - expected.x, point.y - expected.y)
+        if distance > axis_length * _INTERSECTION_SELECTION_MAX_AXIS_FRACTION:
+            self._show_error("Choose a point closer to a visible grid intersection.")
             return
-        self._reference_points.append(GridCalibrationPoint(cell=nearest.cell, pixel=point))
+        if any(
+            reference.row == row and reference.col == col
+            for reference in self._intersection_points()
+        ):
+            self._show_error(f"Grid intersection ({row}, {col}) is already a reference.")
+            return
+        self._reference_points.append(GridIntersectionPoint(row=row, col=col, pixel=point))
         self._detection_candidates.clear()
         self._update_grid_from_dimensions()
 
@@ -1651,10 +1666,10 @@ class CalibrationWindow(QMainWindow):
         self._grid = candidate.grid
         self._reference_points.clear()
         self._points = [
-            candidate.grid.grid_to_pixel(0, 0),
-            candidate.grid.grid_to_pixel(0, 1),
-            candidate.grid.grid_to_pixel(1, 0),
-            candidate.grid.grid_to_pixel(candidate.grid.rows - 1, candidate.grid.cols - 1),
+            candidate.grid.grid_to_pixel(-0.5, -0.5),
+            candidate.grid.grid_to_pixel(-0.5, 0.5),
+            candidate.grid.grid_to_pixel(0.5, -0.5),
+            candidate.grid.grid_to_pixel(candidate.grid.rows - 0.5, candidate.grid.cols - 0.5),
         ]
         self._rows.blockSignals(True)
         self._cols.blockSignals(True)
@@ -1663,24 +1678,24 @@ class CalibrationWindow(QMainWindow):
         self._rows.blockSignals(False)
         self._cols.blockSignals(False)
 
-    def _derive_dimensions_from_last_cell(self) -> None:
+    def _derive_dimensions_from_outer_intersection(self) -> None:
         if self._image is None or len(self._points) != len(_POINT_LABELS):
             return
         self._clear_extraction()
         try:
-            grid = grid_from_four_points(
+            grid = grid_from_four_intersections(
                 image_width=self._image.shape[1],
                 image_height=self._image.shape[0],
-                origin=self._points[0],
+                top_left=self._points[0],
                 next_col=self._points[1],
                 next_row=self._points[2],
-                last_cell=self._points[3],
+                bottom_right=self._points[3],
                 image_sha256=self._image_hash,
             )
         except ValueError as error:
             self._grid = None
             self._points.pop()
-            self._log_activity(f"Could not use the fourth point: {error}")
+            self._log_activity(f"Could not use the outer intersection: {error}")
             self._update_extraction_controls()
             self._update_instruction()
             return
@@ -1694,7 +1709,7 @@ class CalibrationWindow(QMainWindow):
         self._grid = grid
         self._update_extraction_controls()
         self._log_activity(
-            f"Detected {grid.rows} rows × {grid.cols} columns from 4 references; "
+            f"Detected {grid.rows} rows × {grid.cols} columns from 4 intersections; "
             f"RMS error {grid.calibration.residual_rms_px:.2f} px."
         )
 
@@ -1712,26 +1727,26 @@ class CalibrationWindow(QMainWindow):
             return
         try:
             if len(self._points) == len(_POINT_LABELS):
-                self._grid = grid_from_control_points(
+                self._grid = grid_from_intersection_points(
                     rows=self._rows.value(),
                     cols=self._cols.value(),
                     image_width=self._image.shape[1],
                     image_height=self._image.shape[0],
-                    control_points=self._control_points(),
+                    intersections=self._intersection_points(),
                     image_sha256=self._image_hash,
                 )
                 self._log_activity(
-                    f"Fitted {len(self._control_points())} references; "
+                    f"Fitted {len(self._intersection_points())} grid intersections; "
                     f"RMS error {self._grid.calibration.residual_rms_px:.2f} px, "
                     f"max {self._grid.calibration.residual_max_px:.2f} px."
                 )
             else:
-                self._grid = grid_from_three_points(
+                self._grid = grid_from_three_intersections(
                     rows=self._rows.value(),
                     cols=self._cols.value(),
                     image_width=self._image.shape[1],
                     image_height=self._image.shape[0],
-                    origin=self._points[0],
+                    top_left=self._points[0],
                     next_col=self._points[1],
                     next_row=self._points[2],
                     image_sha256=self._image_hash,
@@ -1778,32 +1793,33 @@ class CalibrationWindow(QMainWindow):
         elif len(self._points) < len(_POINT_LABELS):
             if not self._points:
                 next_step = (
-                    "Confirm the row and column counts above, then click the center of the "
-                    "upper-left cell (0, 0)."
+                    "Confirm the row and column counts above, then click the upper-left "
+                    "grid intersection."
                 )
             else:
                 next_step = _POINT_LABELS[len(self._points)]
         elif self._grid is None:
-            next_step = "Adjust the dimensions or undo the last reference point and try again."
+            next_step = "Adjust the dimensions or undo the last intersection and try again."
         else:
             next_step = (
-                "Review the fitted grid, optionally add a labeled cell reference, "
+                "Review the fitted grid, optionally add another visible intersection, "
                 "then extract the cells in memory."
             )
         self._instruction.setText(f"Next step: {next_step}")
 
-    def _control_points(self) -> tuple[GridCalibrationPoint, ...]:
+    def _intersection_points(self) -> tuple[GridIntersectionPoint, ...]:
         if len(self._points) < 3:
             return ()
         points = [
-            GridCalibrationPoint(cell=CellCoord(row=0, col=0), pixel=self._points[0]),
-            GridCalibrationPoint(cell=CellCoord(row=0, col=1), pixel=self._points[1]),
-            GridCalibrationPoint(cell=CellCoord(row=1, col=0), pixel=self._points[2]),
+            GridIntersectionPoint(row=0, col=0, pixel=self._points[0]),
+            GridIntersectionPoint(row=0, col=1, pixel=self._points[1]),
+            GridIntersectionPoint(row=1, col=0, pixel=self._points[2]),
         ]
         if len(self._points) == len(_POINT_LABELS):
             points.append(
-                GridCalibrationPoint(
-                    cell=CellCoord(row=self._rows.value() - 1, col=self._cols.value() - 1),
+                GridIntersectionPoint(
+                    row=self._rows.value(),
+                    col=self._cols.value(),
                     pixel=self._points[3],
                 )
             )
@@ -1844,7 +1860,7 @@ class CalibrationWindow(QMainWindow):
             )
             cv2.putText(
                 preview,
-                f"{reference.cell.row},{reference.cell.col}",
+                f"{reference.row},{reference.col}",
                 (center[0] + 8, center[1] - 8),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
