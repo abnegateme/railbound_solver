@@ -35,13 +35,13 @@ case. `--max-rails` and `--max-ticks` expose the other `SolverLimits` bounds.
 ## Primary interactive workflow
 
 The Windows-host `interactive` command opens the one primary session, rather
-than a separate solver window. Its **Review and solve** tab continues from the
-same calibrated screenshot and in-memory crops: recognition review, semantic
-`level.json` validation, limits, solve, trace inspection, and placement save
-all happen there. A semantic level may also be opened directly when solving an
-authored level without a screenshot. The same tab can load or paste a manual
-`placement.json`, inspect its M5 port graph, and replay it through M6–M7
-before invoking the search.
+than a separate solver window. The visual **Cells** workspace continues from
+the calibrated screenshot and in-memory crops. Once every cell is reviewed,
+**Formalize level** compiles the annotations into the validated in-memory
+`Level` used by the **Solve** tab. Limits, solve, trace inspection, and
+placement save all happen there. The same tab can load or paste a manual
+`placement.json`, inspect its M5 port graph, and replay it through M6–M7 before
+invoking the search.
 
 The result includes the successful placement, its `SimulationResult`, the
 same ordered event trace in `result.trace`, and `SearchStats`. When no

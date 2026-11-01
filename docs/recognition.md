@@ -1,9 +1,11 @@
 # Deterministic recognition (M8)
 
-M8 turns normalized M2 crops into evidence for review. It does not make pixels
-authoritative level data: `recognition_report.json` records candidate labels,
-scores, template provenance, and every cell needing a decision; `level_draft.json`
-is an explicitly incomplete review document, not a simulator input.
+The standalone M8 pipeline turns normalized M2 crops into evidence for review.
+It does not make pixels authoritative level data: `recognition_report.json`
+records candidate labels, scores, template provenance, and every cell needing a
+decision; `level_draft.json` is an explicitly incomplete review document, not a
+simulator input. The primary GUI uses the same deterministic matcher but keeps
+its evidence in an application-local library instead.
 
 ## Label templates
 
@@ -37,15 +39,22 @@ uses the strongest reference for that label, so visual variants do not create
 false ambiguity. The recorded rotation is clockwise from the reference image
 to the observed crop.
 
-In the primary Windows GUI, **Review and solve** can create this catalog
-without leaving the screenshot session: select an extracted crop, give it a
-label, then save the catalog. The UI generates the template ID unless a custom
-one is supplied. Saving writes the portable JSON and `references/*.png` files
-together. The initial labels are necessarily manual; the recognizer cannot
-infer the meaning of its first visual reference. Start with labels that
-describe a visible class rather than a full game rule: `terrain.empty`,
-`track.straight`, `track.curve`, `track.crossing`, `actor.train`,
-`goal.arrival`, and `device.*` are useful conventions.
+The primary Windows GUI does not expose portable catalog management. It keeps
+reusable cell-type definitions and manually confirmed crop samples in one
+application-local SQLite database. Extraction immediately matches the current
+crops against those samples; accepted matches fill the visual cell editor, and
+unknown or ambiguous cells stay highlighted for manual review. A completed
+manual decision becomes a new sample automatically. The first examples are
+therefore necessarily manual: pixels alone cannot establish their game
+meaning.
+
+The GUI type definition separates visual identity from composable semantic
+features: terrain, local graph topology, actors, goals, state, triggers, and
+links. Instance properties hold values such as actor direction or a state
+channel. Formalization accepts only definitions for which every feature has a
+compiler into the validated `Level` model, so an unfamiliar mechanic cannot be
+recognized and then silently discarded. The portable catalog and report flow
+below remains available to standalone CLI workflows.
 
 Matching combines normalized colour-structure correlation with a small
 mean-colour feature. A top match must exceed `min_similarity`; its gap from

@@ -27,44 +27,35 @@ The lower part of the side panel, visible below both tabs, keeps an activity log
 and a current **Next step** recommendation. It occupies roughly one fifth of
 the panel and includes manual calibration guidance when automatic detection
 cannot establish a reliable grid. GUI calibration belongs to the current
-screenshot session and is consumed directly by **Extract cells in memory**; it
+screenshot session and is consumed directly by **Extract cells**; it
 is not saved separately.
 
-Use the same window's **Review and solve** tab for every completed stage:
+The **Grid and cells** tab is the complete parsing workflow. Enter the level
+number first; a conventional number such as `1-13` is inferred from the
+screenshot filename when possible. Cell IDs then combine that number with
+zero-based row and column coordinates.
 
-- Create a template catalog from selected in-memory crops, giving each
-  reference a semantic candidate label. The template ID is optional and is
-  generated from the label and source cell; enter one only when a custom stable
-  name is useful. **Save template catalog** writes `catalog.json` and its
-  `references/*.png` images; alternatively, **Open template catalog** imports
-  an existing portable catalog.
-- Run recognition with the in-memory catalog, correct labels through explicit
-  overrides, and optionally save the report, overrides, or review-state draft.
-- For the standard `terrain.empty`, `terrain.occupied`, `actor.train`, and
-  `goal.arrival` profile, **Build validated level from reviewed labels**
-  creates the semantic level directly. It maps empty, actor, and goal cells to
-  the M9 buildable area; occupied cells remain excluded. It asks only for each
-  train's direction and the rail budget. With one arrival goal, every
-  recognized train is assigned to it; with several goals, choose the target for
-  each train. Opening a saved `level_draft.json` through **Open level.json or
-  level draft** imports it for the same workflow.
-- **Create editable level template from reviewed recognition** remains an
-  advanced route for levels with fixed-track ports, switches, buttons, gates,
-  tunnels, or a different win rule. It retains `terrain.*` labels and grid
-  dimensions but does not guess those additional game rules.
-- Open or paste the completed authoritative `level.json`, validate and save
-  it. Recognition labels remain evidence rather than simulator input.
-- Open or paste a `placement.json` to inspect its compiled port topology and
-  replay its M6–M7 event trace. The optimized solver can then search the same
-  level, show its verified trace and compact performance summary, and save its
-  resulting placement. Pruning and runtime caching are automatic and add no
-  extra controls.
+**Extract cells** uses one fixed normalization profile and opens the visual
+**Cells** workspace. Recognition runs immediately against the locally confirmed
+sample library. Green cards are accepted automatic matches, purple cards were
+reviewed manually, and red cards still need a decision. Choose a known type or
+create a reusable type directly on a card. Type-specific fields appear only
+when needed, for example the direction of a train. A completed manual decision
+is stored as recognition evidence; crops and review files do not need to be
+exported.
 
-The **Grid and cells** tab uses one fixed extraction profile. After extraction,
-the workspace switches from **Screenshot** to **Cells** so the normalized input
-to recognition can be inspected directly; no intermediate artifacts are
-written. A template catalog has a top-level `templates` list; do not select a
-crop manifest or level file as its catalog.
+**Formalize level** becomes available only when every cell has a complete type
+whose graph-state compiler is implemented. It asks for the rail budget and,
+only when necessary, the target goal for each train. The resulting validated
+`Level` remains in memory and opens in the schematic **Level** workspace.
+Recognizable new mechanics may be recorded without data loss, but they remain
+visibly blocked from formalization until their topology/state compiler exists;
+they are never silently ignored.
+
+The **Solve** tab consumes that in-memory formal level. It can inspect or replay
+a `placement.json`, run the solver, show the verified trace, and save the
+resulting placement. Pruning and runtime caching are automatic and add no extra
+controls.
 
 The host environment is only a local GUI runtime, not an installer. Its
 desktop access must remain outside the devcontainer.

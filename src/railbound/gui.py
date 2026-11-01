@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import json
+import re
+import sqlite3
 from math import floor, hypot
 from pathlib import Path
-from typing import cast
+from typing import Literal, cast
 
 import cv2
-from pydantic import TypeAdapter, ValidationError
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QStandardPaths, Qt, Signal
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -23,7 +23,6 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
-    QComboBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -31,9 +30,9 @@ from PySide6.QtWidgets import (
     QGraphicsScene,
     QGraphicsView,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
-    QListWidget,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -55,39 +54,38 @@ from railbound.calibration import (
     grid_from_three_intersections,
     image_sha256,
 )
+from railbound.annotation_gui import CellAnnotationGrid
+from railbound.annotation_store import AnnotationStore
+from railbound.cell_annotation import (
+    ActorFeature,
+    CellAnnotation,
+    CellTypeDefinition,
+    GoalFeature,
+    annotation_errors,
+    annotation_value_errors,
+    cell_type_for_role,
+    formalize_annotations,
+    make_cell_annotation_id,
+    rotate_annotation_properties,
+)
 from railbound.detection import (
     CalibrationCandidate,
     GridDetectionHints,
     GridDetector,
     render_detection_overlay,
 )
-from railbound.extraction import CellCrop, CellExtractor, CropSpec, render_crop_contact_sheet
+from railbound.extraction import CellCrop, CellExtractor, CropSpec
 from railbound.geometry import CellCoord, GridGeometry, PixelPoint
 from railbound.level import Level
-from railbound.level_io import save_level
 from railbound.placement_io import load_placement, save_placement
 from railbound.recognition import (
-    LevelDraft,
-    RecognitionOverride,
-    RecognitionReport,
-    RecognitionSource,
     RecognitionStatus,
-    RecognitionThresholds,
     Template,
     TemplateCatalog,
     TemplateDefinition,
     TemplateRecognizer,
-    resolve,
 )
-from railbound.recognition_io import (
-    load_template_catalog,
-    load_template_images,
-    save_level_draft,
-    save_recognition_overrides,
-    save_recognition_report,
-    save_template_catalog,
-)
-from railbound.rendering import ColorImage, render_grid_overlay
+from railbound.rendering import ColorImage, render_grid_overlay, render_level_schematic
 from railbound.simulation import SimulationEvent, SimulationOptions, simulate
 from railbound.solver import SolverLimits, SolverResult, SolverStatus, solve
 from railbound.topology import (
@@ -177,6 +175,22 @@ QPushButton#primaryAction:disabled {
     color: #9c97a4;
     background-color: #e2dfe7;
 }
+QPushButton#secondaryAction {
+    min-height: 32px;
+    padding: 0 14px;
+    color: #6750a4;
+    background-color: transparent;
+    border: 1px solid #79747e;
+    border-radius: 16px;
+    font-weight: 600;
+}
+QPushButton#secondaryAction:hover {
+    background-color: #f0ebf7;
+}
+QPushButton#secondaryAction:disabled {
+    color: #9c97a4;
+    border-color: #c9c5cf;
+}
 QLabel#cellsSummary {
     color: #6f7480;
     font-size: 11px;
@@ -188,7 +202,6 @@ _POINT_LABELS = (
     "Click the adjacent grid intersection below it.",
     "Click the outer bottom-right grid intersection.",
 )
-_OVERRIDES_ADAPTER = TypeAdapter(tuple[RecognitionOverride, ...])
 
 
 class CalibrationCanvas(QGraphicsView):
@@ -259,16 +272,13 @@ class CalibrationWindow(QMainWindow):
         self._grid: GridGeometry | None = None
         self._crops: list[CellCrop] = []
         self._crop_spec: CropSpec | None = None
+        self._annotation_store = AnnotationStore(_annotation_store_path())
+        self._cell_types: dict[str, CellTypeDefinition] = {
+            definition.id: definition for definition in self._annotation_store.cell_types()
+        }
+        self._rail_budget: int | None = None
         self._automatic_detection = automatic_detection
         self._detection_candidates: list[CalibrationCandidate] = []
-        self._recognition_report: RecognitionReport | None = None
-        self._level_draft: LevelDraft | None = None
-        self._actor_direction_selectors: dict[tuple[int, int], QComboBox] = {}
-        self._actor_goal_selectors: dict[tuple[int, int], QComboBox] = {}
-        self._catalog_templates: dict[str, Template] = {}
-        self._catalog_recognizer_version = "template-ncc-v1"
-        self._catalog_thresholds = RecognitionThresholds()
-        self._template_catalog_path: Path | None = None
         self._level: Level | None = None
         self._level_path: Path | None = None
         self._placement: RailPlacement | None = None
@@ -369,14 +379,24 @@ class CalibrationWindow(QMainWindow):
         cells_layout.setSpacing(8)
         cells_title = QLabel("Cells")
         cells_title.setObjectName("calibrationTitle")
+        cells_layout.addWidget(cells_title)
+        level_row = QHBoxLayout()
+        level_row.addWidget(QLabel("Level"))
+        self._level_number = QLineEdit()
+        self._level_number.setPlaceholderText("e.g. 1-13")
+        self._level_number.textChanged.connect(self._level_number_changed)
+        level_row.addWidget(self._level_number, stretch=1)
+        cells_layout.addLayout(level_row)
         self._extract_button = QPushButton("Extract cells")
-        self._extract_button.setObjectName("primaryAction")
+        self._extract_button.setObjectName("secondaryAction")
         self._extract_button.clicked.connect(self._extract_cells)
-        cells_header = QHBoxLayout()
-        cells_header.addWidget(cells_title)
-        cells_header.addStretch()
-        cells_header.addWidget(self._extract_button)
-        cells_layout.addLayout(cells_header)
+        self._formalize_button = QPushButton("Formalize level")
+        self._formalize_button.setObjectName("primaryAction")
+        self._formalize_button.clicked.connect(self._formalize_level)
+        actions = QHBoxLayout()
+        actions.addWidget(self._extract_button)
+        actions.addWidget(self._formalize_button)
+        cells_layout.addLayout(actions)
         self._crop_summary = QLabel()
         self._crop_summary.setObjectName("cellsSummary")
         self._crop_summary.setWordWrap(True)
@@ -395,15 +415,20 @@ class CalibrationWindow(QMainWindow):
 
         content = QWidget()
         content_layout = QHBoxLayout(content)
-        self._crop_canvas = CalibrationCanvas()
+        self._cell_editor = CellAnnotationGrid()
+        self._cell_editor.annotation_changed.connect(self._cell_annotation_changed)
+        self._cell_editor.new_type_requested.connect(self._create_cell_type)
+        self._level_canvas = CalibrationCanvas()
         self._workspace_tabs = QTabWidget()
         self._workspace_tabs.addTab(self._canvas, "Screenshot")
-        self._cells_tab_index = self._workspace_tabs.addTab(self._crop_canvas, "Cells")
+        self._cells_tab_index = self._workspace_tabs.addTab(self._cell_editor, "Cells")
+        self._level_tab_index = self._workspace_tabs.addTab(self._level_canvas, "Level")
         self._workspace_tabs.setTabEnabled(self._cells_tab_index, False)
+        self._workspace_tabs.setTabEnabled(self._level_tab_index, False)
         content_layout.addWidget(self._workspace_tabs, stretch=1)
         tabs = QTabWidget()
         tabs.addTab(calibration_controls, "Grid and cells")
-        tabs.addTab(self._build_review_and_solver_tab(), "Review and solve")
+        tabs.addTab(self._build_review_and_solver_tab(), "Solve")
 
         sidebar = QWidget()
         sidebar.setMinimumWidth(360)
@@ -416,142 +441,15 @@ class CalibrationWindow(QMainWindow):
         self._update_extraction_controls()
 
     def _build_review_and_solver_tab(self) -> QScrollArea:
-        """Build the semantic review and solver controls in the main session."""
+        """Build only controls that consume an already formalized in-memory level."""
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.addWidget(QLabel("Template catalog"))
-        self._new_catalog_button = QPushButton("New template catalog")
-        self._new_catalog_button.clicked.connect(self._new_template_catalog)
-        self._open_catalog_button = QPushButton("Open template catalog…")
-        self._open_catalog_button.clicked.connect(self._open_template_catalog_dialog)
-        self._save_catalog_button = QPushButton("Save template catalog…")
-        self._save_catalog_button.clicked.connect(self._save_template_catalog_dialog)
-        self._catalog_status = QLabel("Create a catalog from extracted cells or open one.")
-        self._catalog_status.setWordWrap(True)
-        self._template_crop_selector = QComboBox()
-        self._template_id_editor = QLineEdit()
-        self._template_id_editor.setPlaceholderText(
-            "optional; generated from label and source crop"
-        )
-        self._template_label_editor = QLineEdit()
-        self._template_label_editor.setPlaceholderText(
-            "semantic candidate label, e.g. terrain.empty"
-        )
-        label_hint = QLabel(
-            "For automatic level construction use terrain.empty, terrain.occupied, actor.train, "
-            "and goal.arrival. Other useful labels include track.straight, track.curve, "
-            "track.crossing, device.switch, device.button, device.gate, and device.tunnel. "
-            "Use one visual class per label."
-        )
-        label_hint.setWordWrap(True)
-        self._template_id_editor.textChanged.connect(self._update_semantic_controls)
-        self._template_label_editor.textChanged.connect(self._update_semantic_controls)
-        self._add_template_button = QPushButton("Add/update selected crop as template")
-        self._add_template_button.clicked.connect(self._add_template_from_crop)
-        self._remove_template_button = QPushButton("Remove selected template")
-        self._remove_template_button.clicked.connect(self._remove_selected_template)
-        self._template_list = QListWidget()
-        self._template_list.setMinimumHeight(110)
-        self._template_list.currentRowChanged.connect(self._template_selection_changed)
-        template_form = QFormLayout()
-        template_form.addRow("Source crop", self._template_crop_selector)
-        template_form.addRow("Template ID (optional)", self._template_id_editor)
-        template_form.addRow("Label", self._template_label_editor)
-        layout.addWidget(self._new_catalog_button)
-        layout.addWidget(self._open_catalog_button)
-        layout.addWidget(self._save_catalog_button)
-        layout.addWidget(self._catalog_status)
-        layout.addLayout(template_form)
-        layout.addWidget(label_hint)
-        layout.addWidget(self._add_template_button)
-        layout.addWidget(self._remove_template_button)
-        layout.addWidget(self._template_list)
-
-        layout.addWidget(QLabel("Recognition review"))
-        self._recognize_button = QPushButton("Recognize extracted cells with catalog")
-        self._recognize_button.clicked.connect(self._recognize_crops)
-        catalog_hint = QLabel(
-            "Create a catalog from selected crops or open one with a top-level `templates` list; "
-            "a crop manifest or level file is not a recognition catalog."
-        )
-        catalog_hint.setWordWrap(True)
-        self._recognition_summary = QLabel()
-        self._recognition_summary.setWordWrap(True)
-        self._recognition_view = QPlainTextEdit()
-        self._recognition_view.setReadOnly(True)
-        self._recognition_view.setMinimumHeight(130)
-        self._overrides_editor = QPlainTextEdit("[]")
-        self._overrides_editor.setPlaceholderText(
-            "Optional JSON array of RecognitionOverride objects, for example:\n"
-            '[{"cell": {"row": 0, "col": 1}, "label": "track.curve"}]'
-        )
-        self._apply_overrides_button = QPushButton("Apply recognition overrides")
-        self._apply_overrides_button.clicked.connect(self._apply_recognition_overrides)
-        self._save_report_button = QPushButton("Save recognition report…")
-        self._save_report_button.clicked.connect(self._save_recognition_report_dialog)
-        self._save_overrides_button = QPushButton("Save recognition overrides…")
-        self._save_overrides_button.clicked.connect(self._save_recognition_overrides_dialog)
-        self._save_draft_button = QPushButton("Save level draft…")
-        self._save_draft_button.clicked.connect(self._save_level_draft_dialog)
-        layout.addWidget(self._recognize_button)
-        layout.addWidget(catalog_hint)
-        layout.addWidget(self._recognition_summary)
-        layout.addWidget(self._recognition_view)
-        layout.addWidget(QLabel("Recognition overrides (JSON)"))
-        layout.addWidget(self._overrides_editor)
-        layout.addWidget(self._apply_overrides_button)
-        layout.addWidget(self._save_report_button)
-        layout.addWidget(self._save_overrides_button)
-        layout.addWidget(self._save_draft_button)
-
-        layout.addWidget(QLabel("Build semantic level from reviewed labels"))
-        self._semantic_mapping_summary = QLabel(
-            "Resolve recognition cells to configure a semantic level from their labels."
-        )
-        self._semantic_mapping_summary.setWordWrap(True)
-        self._semantic_mapping_form = QFormLayout()
-        self._semantic_level_id = QLineEdit("reviewed-level")
-        self._semantic_level_id.setPlaceholderText("level ID")
-        self._semantic_inventory = QSpinBox()
-        self._semantic_inventory.setRange(0, 10_000)
-        self._semantic_inventory.setValue(0)
-        self._semantic_settings_form = QFormLayout()
-        self._semantic_settings_form.addRow("Level ID", self._semantic_level_id)
-        self._semantic_settings_form.addRow("Available rails", self._semantic_inventory)
-        self._build_level_from_labels_button = QPushButton(
-            "Build validated level from reviewed labels"
-        )
-        self._build_level_from_labels_button.clicked.connect(self._build_level_from_labels)
-        layout.addWidget(self._semantic_mapping_summary)
-        layout.addLayout(self._semantic_settings_form)
-        layout.addLayout(self._semantic_mapping_form)
-        layout.addWidget(self._build_level_from_labels_button)
-
-        layout.addWidget(QLabel("Authoritative semantic level"))
-        self._create_level_from_draft_button = QPushButton(
-            "Create editable level template from reviewed recognition"
-        )
-        self._create_level_from_draft_button.clicked.connect(self._create_level_from_draft)
-        self._load_level_button = QPushButton("Open level.json or level draft…")
-        self._load_level_button.clicked.connect(self._open_level_dialog)
-        self._validate_level_button = QPushButton("Validate semantic level")
-        self._validate_level_button.clicked.connect(self._validate_level_editor)
-        self._save_level_button = QPushButton("Save level.json…")
-        self._save_level_button.clicked.connect(self._save_level_editor)
+        layout.addWidget(QLabel("Formal level"))
         self._level_editor = QPlainTextEdit()
-        self._level_editor.setPlaceholderText(
-            "Create a template from reviewed recognition, or open/paste a complete authoritative "
-            "level.json here. Confirm actors, rails, inventory, and goals before validation."
-        )
-        self._level_editor.setMinimumHeight(220)
+        self._level_editor.hide()
         self._level_editor.textChanged.connect(self._level_editor_changed)
-        self._semantic_status = QLabel()
+        self._semantic_status = QLabel("Formalize the reviewed cells before solving.")
         self._semantic_status.setWordWrap(True)
-        layout.addWidget(self._create_level_from_draft_button)
-        layout.addWidget(self._load_level_button)
-        layout.addWidget(self._validate_level_button)
-        layout.addWidget(self._save_level_button)
-        layout.addWidget(self._level_editor)
         layout.addWidget(self._semantic_status)
 
         layout.addWidget(QLabel("Placement inspection and replay"))
@@ -629,646 +527,6 @@ class CalibrationWindow(QMainWindow):
         """Return the latest result produced inside this interactive session."""
         return self._solver_result
 
-    def _new_template_catalog(self) -> None:
-        """Start an empty in-memory catalog without discarding the extracted crops."""
-        self._catalog_templates.clear()
-        self._catalog_recognizer_version = "template-ncc-v1"
-        self._catalog_thresholds = RecognitionThresholds()
-        self._template_catalog_path = None
-        self._template_id_editor.clear()
-        self._template_label_editor.clear()
-        self._refresh_template_catalog_view()
-        self._catalog_status.setText(
-            "New empty catalog. Select extracted crops and give each visual class a label."
-        )
-
-    def _open_template_catalog_dialog(self) -> None:
-        """Load labelled reference images and their portable catalog into this session."""
-        selected, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open template catalog",
-            str(
-                self._template_catalog_path.parent
-                if self._template_catalog_path is not None
-                else self._image_path.parent
-                if self._image_path is not None
-                else Path.cwd()
-            ),
-            "Template catalog JSON (*.json)",
-        )
-        if selected:
-            self._load_template_catalog_from_path(Path(selected))
-
-    def _load_template_catalog_from_path(self, path: Path) -> None:
-        """Adopt one portable catalog and decoded references for in-memory recognition."""
-        try:
-            catalog = load_template_catalog(path)
-            templates = load_template_images(catalog, path)
-        except ValidationError as error:
-            first_error = error.errors()[0]["msg"]
-            self._show_error(
-                f"{path.name} is not a valid template catalog. Choose the labelled catalog JSON "
-                "with a top-level `templates` list, not a crop manifest or level file. "
-                f"First problem: {first_error}"
-            )
-            return
-        except (OSError, ValueError) as error:
-            self._show_error(f"Could not load template catalog: {error}")
-            return
-
-        self._catalog_templates = {template.definition.id: template for template in templates}
-        self._catalog_recognizer_version = catalog.recognizer_version
-        self._catalog_thresholds = catalog.thresholds
-        self._template_catalog_path = path
-        self._refresh_template_catalog_view()
-        self._catalog_status.setText(
-            f"Loaded {len(templates)} template(s) from {path.name}. "
-            "You can use them immediately or add/update references from this screenshot."
-        )
-
-    def _save_template_catalog_dialog(self) -> None:
-        """Choose a portable catalog path for the in-memory reference set."""
-        if not self._catalog_templates:
-            self._show_error("Add or open at least one template before saving a catalog.")
-            return
-        suggested = self._template_catalog_path or Path("catalog.json")
-        selected, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save template catalog",
-            str(suggested),
-            "Template catalog JSON (*.json)",
-        )
-        if selected:
-            self._save_template_catalog_to_path(Path(selected).with_suffix(".json"))
-
-    def _save_template_catalog_to_path(self, path: Path) -> None:
-        """Write catalog JSON and its labelled reference images below ``path``."""
-        if not self._catalog_templates:
-            self._show_error("Add or open at least one template before saving a catalog.")
-            return
-        saved_templates: dict[str, Template] = {}
-        try:
-            references_directory = path.parent / "references"
-            references_directory.mkdir(parents=True, exist_ok=True)
-            for template in self._ordered_catalog_templates():
-                definition = TemplateDefinition(
-                    id=template.definition.id,
-                    label=template.definition.label,
-                    image=f"references/{template.definition.id}.png",
-                    rotations=template.definition.rotations,
-                )
-                image_path = path.parent / definition.image
-                if not cv2.imwrite(str(image_path), template.image):
-                    raise OSError(f"could not write template image: {image_path}")
-                saved_templates[definition.id] = Template(
-                    definition=definition,
-                    image=template.image.copy(),
-                )
-            catalog = TemplateCatalog(
-                recognizer_version=self._catalog_recognizer_version,
-                thresholds=self._catalog_thresholds,
-                templates=tuple(
-                    saved_templates[template_id].definition
-                    for template_id in sorted(saved_templates)
-                ),
-            )
-            save_template_catalog(catalog, path)
-        except (OSError, ValueError) as error:
-            self._show_error(f"Could not save template catalog: {error}")
-            return
-
-        self._catalog_templates = saved_templates
-        self._template_catalog_path = path
-        self._refresh_template_catalog_view()
-        self._catalog_status.setText(
-            f"Saved {len(saved_templates)} template(s) and catalog to {path}."
-        )
-
-    def _add_template_from_crop(self) -> None:
-        """Use one calibrated in-memory crop as a labelled visual reference."""
-        crop = self._selected_template_crop()
-        if crop is None:
-            self._show_error("Extract cells and select a source crop before adding a template.")
-            return
-        template_id = self._template_id_editor.text().strip() or self._suggested_template_id(crop)
-        existing = self._catalog_templates.get(template_id)
-        try:
-            if existing is None:
-                definition = TemplateDefinition(
-                    id=template_id,
-                    label=self._template_label_editor.text().strip(),
-                    image=f"references/{template_id}.png",
-                )
-            else:
-                definition = TemplateDefinition(
-                    id=template_id,
-                    label=self._template_label_editor.text().strip(),
-                    image=f"references/{template_id}.png",
-                    rotations=existing.definition.rotations,
-                )
-        except ValueError as error:
-            self._show_error(f"Template ID or label is invalid: {error}")
-            return
-
-        image = crop.image.copy()
-        self._catalog_templates[definition.id] = Template(definition=definition, image=image)
-        self._refresh_template_catalog_view(selected_id=definition.id)
-        self._catalog_status.setText(
-            f"Stored crop ({crop.cell.row}, {crop.cell.col}) as template {definition.id!r}."
-        )
-
-    def _remove_selected_template(self) -> None:
-        """Remove the selected in-memory reference from the pending catalog."""
-        row = self._template_list.currentRow()
-        template_ids = self._catalog_template_ids()
-        if row < 0 or row >= len(template_ids):
-            self._show_error("Select a template to remove.")
-            return
-        removed_id = template_ids[row]
-        del self._catalog_templates[removed_id]
-        self._refresh_template_catalog_view()
-        self._catalog_status.setText(f"Removed template {removed_id!r} from the in-memory catalog.")
-
-    def _template_selection_changed(self, row: int) -> None:
-        """Expose the selected template fields for deliberate editing or replacement."""
-        template_ids = self._catalog_template_ids()
-        if row < 0 or row >= len(template_ids):
-            return
-        template = self._catalog_templates[template_ids[row]]
-        self._template_id_editor.setText(template.definition.id)
-        self._template_label_editor.setText(template.definition.label)
-
-    def _selected_template_crop(self) -> CellCrop | None:
-        """Return the crop chosen by the catalog authoring controls."""
-        index = self._template_crop_selector.currentIndex()
-        if index < 0 or index >= len(self._crops):
-            return None
-        return self._crops[index]
-
-    def _suggested_template_id(self, crop: CellCrop) -> str:
-        """Generate a readable unique ID so catalog authoring only requires a label."""
-        label = self._template_label_editor.text().strip().lower()
-        characters = (
-            character
-            if character.isascii() and (character.isalnum() or character in ".-_:")
-            else "-"
-            for character in label
-        )
-        prefix = "".join(characters).strip("-.") or "reference"
-        base = f"{prefix}-r{crop.cell.row:03d}-c{crop.cell.col:03d}"
-        template_id = base
-        suffix = 2
-        while template_id in self._catalog_templates:
-            template_id = f"{base}-{suffix}"
-            suffix += 1
-        return template_id
-
-    def _ordered_catalog_templates(self) -> tuple[Template, ...]:
-        """Return in-memory templates in the recognizer's stable ID order."""
-        return tuple(
-            self._catalog_templates[template_id] for template_id in self._catalog_template_ids()
-        )
-
-    def _catalog_template_ids(self) -> list[str]:
-        """Return reference IDs in the same deterministic order used for recognition."""
-        return sorted(self._catalog_templates)
-
-    def _build_template_catalog(self) -> TemplateCatalog:
-        """Create the validated catalog corresponding to the current in-memory images."""
-        return TemplateCatalog(
-            recognizer_version=self._catalog_recognizer_version,
-            thresholds=self._catalog_thresholds,
-            templates=tuple(template.definition for template in self._ordered_catalog_templates()),
-        )
-
-    def _refresh_template_crop_choices(self) -> None:
-        """Present every row-major extracted crop as a possible labelled reference."""
-        previous_index = self._template_crop_selector.currentIndex()
-        self._template_crop_selector.blockSignals(True)
-        self._template_crop_selector.clear()
-        for index, crop in enumerate(self._crops):
-            self._template_crop_selector.addItem(f"({crop.cell.row}, {crop.cell.col})", index)
-        if self._crops:
-            self._template_crop_selector.setCurrentIndex(
-                min(max(previous_index, 0), len(self._crops) - 1)
-            )
-        self._template_crop_selector.blockSignals(False)
-
-    def _refresh_template_catalog_view(self, *, selected_id: str | None = None) -> None:
-        """Render in-memory references without writing catalog files prematurely."""
-        self._template_list.blockSignals(True)
-        self._template_list.clear()
-        template_ids = self._catalog_template_ids()
-        for template_id in template_ids:
-            definition = self._catalog_templates[template_id].definition
-            self._template_list.addItem(f"{definition.id} — {definition.label}")
-        if selected_id is not None and selected_id in template_ids:
-            self._template_list.setCurrentRow(template_ids.index(selected_id))
-        self._template_list.blockSignals(False)
-        self._update_semantic_controls()
-
-    def _recognize_crops(self) -> None:
-        """Recognize the current in-memory crops without writing intermediate files."""
-        if self._image is None or self._grid is None or self._crop_spec is None or not self._crops:
-            self._show_error("Extract calibrated cells before starting recognition.")
-            return
-        if not self._catalog_templates:
-            self._show_error(
-                "Create a template catalog from extracted crops or open an existing catalog first."
-            )
-            return
-        try:
-            catalog = self._build_template_catalog()
-            recognizer = TemplateRecognizer(catalog, self._ordered_catalog_templates())
-            observations = tuple(recognizer.recognize(crop) for crop in self._crops)
-            source = RecognitionSource(
-                image_sha256=self._image_hash,
-                image_width=self._image.shape[1],
-                image_height=self._image.shape[0],
-                rows=self._grid.rows,
-                cols=self._grid.cols,
-                crop_spec=self._crop_spec,
-            )
-            self._recognition_report = RecognitionReport(
-                source=source,
-                template_catalog=catalog,
-                template_fingerprint=recognizer.fingerprint,
-                thresholds=recognizer.thresholds,
-                observations=observations,
-                review_cells=tuple(
-                    observation.cell
-                    for observation in observations
-                    if observation.status is not RecognitionStatus.ACCEPTED
-                ),
-            )
-        except (OSError, ValueError) as error:
-            self._show_error(f"Could not recognize extracted cells: {error}")
-            return
-
-        self._overrides_editor.setPlainText("[]")
-        self._apply_recognition_overrides()
-
-    def _recognition_overrides(self) -> tuple[RecognitionOverride, ...] | None:
-        """Parse the visible manual decisions before applying or exporting them."""
-        try:
-            return _OVERRIDES_ADAPTER.validate_json(
-                self._overrides_editor.toPlainText().strip() or "[]"
-            )
-        except ValueError as error:
-            self._show_error(f"Recognition overrides are invalid: {error}")
-            return None
-
-    def _apply_recognition_overrides(self) -> None:
-        """Apply visible manual recognition choices to the current report."""
-        if self._recognition_report is None:
-            self._show_error("Run recognition before applying overrides.")
-            return
-        overrides = self._recognition_overrides()
-        if overrides is None:
-            return
-        try:
-            self._level_draft = resolve(self._recognition_report, overrides)
-        except ValueError as error:
-            self._show_error(f"Could not apply recognition overrides: {error}")
-            return
-
-        self._refresh_semantic_mapping_form()
-        self._render_recognition_review(self._recognition_report, self._level_draft)
-        self._update_semantic_controls()
-
-    def _save_recognition_report_dialog(self) -> None:
-        """Persist the full matching evidence from the current interactive session."""
-        if self._recognition_report is None:
-            self._show_error("Run recognition before saving its report.")
-            return
-        selected, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save recognition report",
-            "recognition_report.json",
-            "Recognition report JSON (*.json)",
-        )
-        if selected:
-            self._save_recognition_report_to_path(Path(selected).with_suffix(".json"))
-
-    def _save_recognition_report_to_path(self, path: Path) -> None:
-        """Write the current immutable evidence report to one explicit path."""
-        if self._recognition_report is None:
-            self._show_error("Run recognition before saving its report.")
-            return
-        try:
-            save_recognition_report(self._recognition_report, path)
-        except OSError as error:
-            self._show_error(f"Could not save recognition report: {error}")
-            return
-        self._recognition_summary.setText(f"Saved recognition report to {path}.")
-
-    def _save_recognition_overrides_dialog(self) -> None:
-        """Persist visible manual decisions independently from the recognition evidence."""
-        overrides = self._recognition_overrides()
-        if overrides is None:
-            return
-        selected, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save recognition overrides",
-            "recognition_overrides.json",
-            "Recognition overrides JSON (*.json)",
-        )
-        if selected:
-            self._save_recognition_overrides_to_path(overrides, Path(selected).with_suffix(".json"))
-
-    def _save_recognition_overrides_to_path(
-        self, overrides: tuple[RecognitionOverride, ...], path: Path
-    ) -> None:
-        """Write explicit recognition choices in their portable JSON representation."""
-        try:
-            save_recognition_overrides(overrides, path)
-        except OSError as error:
-            self._show_error(f"Could not save recognition overrides: {error}")
-            return
-        self._recognition_summary.setText(f"Saved recognition overrides to {path}.")
-
-    def _save_level_draft_dialog(self) -> None:
-        """Persist the latest review state without turning it into a semantic level."""
-        if self._level_draft is None:
-            self._show_error("Apply recognition overrides before saving a level draft.")
-            return
-        selected, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save level draft",
-            "level_draft.json",
-            "Level draft JSON (*.json)",
-        )
-        if selected:
-            self._save_level_draft_to_path(Path(selected).with_suffix(".json"))
-
-    def _save_level_draft_to_path(self, path: Path) -> None:
-        """Write the current review-state document for semantic authoring later."""
-        if self._level_draft is None:
-            self._show_error("Apply recognition overrides before saving a level draft.")
-            return
-        try:
-            save_level_draft(self._level_draft, path)
-        except OSError as error:
-            self._show_error(f"Could not save level draft: {error}")
-            return
-        self._recognition_summary.setText(f"Saved level draft to {path}.")
-
-    def _render_recognition_review(self, report: RecognitionReport, draft: LevelDraft) -> None:
-        """Show candidates, confidence, and unresolved cells in row-major order."""
-        lines: list[str] = []
-        for observation in report.observations:
-            candidate = observation.candidates[0].label if observation.candidates else "-"
-            lines.append(
-                f"({observation.cell.row}, {observation.cell.col}) "
-                f"{observation.status.value}: {candidate} "
-                f"({observation.confidence:.2f})"
-            )
-        if draft.unresolved_cells:
-            unresolved = ", ".join(f"({cell.row}, {cell.col})" for cell in draft.unresolved_cells)
-            self._recognition_summary.setText(
-                f"{len(draft.unresolved_cells)} cell(s) still require a manual label: {unresolved}"
-            )
-        else:
-            self._recognition_summary.setText(
-                "Every cell has a reviewed label. Build a semantic level from the standard "
-                "terrain/train/goal labels below, or use the advanced JSON template for other rules."
-            )
-        self._recognition_view.setPlainText("\n".join(lines))
-
-    def _draft_cells(self, label: str) -> tuple[CellCoord, ...]:
-        """Return reviewed cells with one exact recognition label in row-major order."""
-        if self._level_draft is None:
-            return ()
-        return tuple(
-            resolved.cell
-            for resolved in self._level_draft.resolved_cells
-            if resolved.label == label
-        )
-
-    def _refresh_semantic_mapping_form(self) -> None:
-        """Show only semantic facts that recognition labels do not encode."""
-        while self._semantic_mapping_form.rowCount():
-            self._semantic_mapping_form.removeRow(0)
-        self._actor_direction_selectors.clear()
-        self._actor_goal_selectors.clear()
-
-        if self._level_draft is None:
-            self._semantic_mapping_summary.setText(
-                "Resolve recognition cells to configure a semantic level from their labels."
-            )
-            return
-
-        actors = self._draft_cells("actor.train")
-        goals = self._draft_cells("goal.arrival")
-        empty_cells = self._draft_cells("terrain.empty")
-        occupied_cells = self._draft_cells("terrain.occupied")
-        if not self._level_draft.is_complete:
-            self._semantic_mapping_summary.setText(
-                "Resolve every recognition cell before building a semantic level."
-            )
-            return
-
-        self._semantic_mapping_summary.setText(
-            f"Recognized {len(actors)} train(s), {len(goals)} arrival goal(s), "
-            f"{len(empty_cells)} empty cell(s), and {len(occupied_cells)} blocked cell(s). "
-            "Choose train directions and rail budget; labels already supply positions and terrain. "
-            "With one goal, every recognized train is assigned to it."
-        )
-        for index, cell in enumerate(actors, start=1):
-            direction = QComboBox()
-            direction.addItem("Choose direction…", None)
-            for code, name in (("N", "North"), ("E", "East"), ("S", "South"), ("W", "West")):
-                direction.addItem(f"{name} ({code})", code)
-            key = (cell.row, cell.col)
-            self._actor_direction_selectors[key] = direction
-            self._semantic_mapping_form.addRow(
-                f"Train {index} at ({cell.row}, {cell.col}) direction", direction
-            )
-            if len(goals) > 1:
-                goal = QComboBox()
-                for goal_index, goal_cell in enumerate(goals):
-                    goal.addItem(
-                        f"Goal at ({goal_cell.row}, {goal_cell.col})",
-                        goal_index,
-                    )
-                self._actor_goal_selectors[key] = goal
-                self._semantic_mapping_form.addRow(f"Train {index} arrival goal", goal)
-        if not actors:
-            self._semantic_mapping_summary.setText(
-                "No actor.train label is present. Label each starting train before building a level."
-            )
-        elif not goals:
-            self._semantic_mapping_summary.setText(
-                "No goal.arrival label is present. Label each arrival cell before building a level."
-            )
-
-    def _build_level_from_labels(self) -> None:
-        """Materialize the supported reviewed-label profile as a validated level."""
-        if self._level_draft is None or not self._level_draft.is_complete:
-            self._show_error("Resolve every recognition cell before building a semantic level.")
-            return
-        actors = self._draft_cells("actor.train")
-        goals = self._draft_cells("goal.arrival")
-        if not actors or not goals:
-            self._show_error(
-                "A level built from labels requires at least one actor.train and one goal.arrival."
-            )
-            return
-        level_id = self._semantic_level_id.text().strip()
-        if not level_id:
-            self._show_error("Enter a level ID before building the semantic level.")
-            return
-
-        directions: list[str] = []
-        for index, cell in enumerate(actors, start=1):
-            direction = self._actor_direction_selectors[(cell.row, cell.col)].currentData()
-            if not isinstance(direction, str):
-                self._show_error(
-                    f"Choose the direction for train {index} at ({cell.row}, {cell.col})."
-                )
-                return
-            directions.append(direction)
-
-        actor_documents: list[dict[str, object]] = []
-        arrival_documents: list[dict[str, object]] = []
-        for index, (cell, direction) in enumerate(zip(actors, directions, strict=True), start=1):
-            actor_id = f"train-{index}"
-            actor_documents.append(
-                {
-                    "id": actor_id,
-                    "cell": _cell_document(cell),
-                    "direction": direction,
-                    "actor_type": "train",
-                    "number": index,
-                }
-            )
-            goal_index = 0
-            selector = self._actor_goal_selectors.get((cell.row, cell.col))
-            if selector is not None:
-                selected_goal = selector.currentData()
-                if not isinstance(selected_goal, int):
-                    self._show_error(f"Choose an arrival goal for train {index}.")
-                    return
-                goal_index = selected_goal
-            arrival_documents.append(
-                {
-                    "actor_id": actor_id,
-                    "target_cell": _cell_document(goals[goal_index]),
-                }
-            )
-
-        terrain_documents = [
-            {"cell": _cell_document(cell), "kind": label}
-            for label in ("terrain.empty", "terrain.occupied")
-            for cell in self._draft_cells(label)
-        ]
-        buildable_cells = [
-            _cell_document(cell)
-            for label in ("terrain.empty", "actor.train", "goal.arrival")
-            for cell in self._draft_cells(label)
-        ]
-        document: dict[str, object] = {
-            "schema_version": 1,
-            "ruleset_version": "railbound-observed-v1",
-            "id": level_id,
-            "metadata": {"source": "reviewed-recognition-labels"},
-            "rows": self._level_draft.source.rows,
-            "cols": self._level_draft.source.cols,
-            "terrain": terrain_documents,
-            "buildable_cells": buildable_cells,
-            "fixed_tracks": [],
-            "actors": actor_documents,
-            "switches": [],
-            "buttons": [],
-            "gates": [],
-            "tunnel_endpoints": [],
-            "rail_inventory": {"total_budget": self._semantic_inventory.value()},
-            "win_condition": {
-                "required_arrivals": arrival_documents,
-                "arrival_order": [],
-                "required_couplings": [],
-            },
-        }
-        try:
-            level = Level.model_validate(document)
-            self._validate_level_grid_dimensions(level)
-        except ValueError as error:
-            self._show_error(f"Could not build semantic level from labels: {error}")
-            return
-        self._level_path = None
-        self._level_editor.setPlainText(level.model_dump_json(indent=2))
-        self._set_validated_level(level, None)
-        self._semantic_status.setText(
-            "Built and validated level from reviewed labels. Actor and goal cells are included "
-            "in the M9 buildable area so the solver can place their rail segments."
-        )
-
-    def _create_level_from_draft(self) -> None:
-        """Create an editable M4 document without guessing unobserved game rules."""
-        if self._level_draft is None:
-            self._show_error(
-                "Run recognition and apply its review decisions before creating a level."
-            )
-            return
-        if not self._level_draft.is_complete:
-            self._show_error(
-                "Resolve every recognition cell before creating a semantic level template."
-            )
-            return
-        template = _semantic_level_template(self._level_draft)
-        self._level_path = None
-        self._level_editor.setPlainText(json.dumps(template, indent=2) + "\n")
-        self._semantic_status.setText(
-            "Created an editable level template. Recognition supplied only terrain labels; add "
-            "actors, buildable cells, fixed-track topology/devices, inventory, and win condition "
-            "before validation and saving level.json."
-        )
-
-    def _open_level_dialog(self) -> None:
-        """Load an authoritative semantic level into the in-window editor."""
-        selected, _ = QFileDialog.getOpenFileName(
-            self,
-            "Open semantic level",
-            str(self._level_path.parent if self._level_path else Path.cwd()),
-            "Level JSON (*.json)",
-        )
-        if selected:
-            self._load_level_from_path(Path(selected))
-
-    def _load_level_from_path(self, path: Path) -> None:
-        """Read, validate, and display a semantic level without changing its data."""
-        try:
-            raw_level = path.read_text(encoding="utf-8")
-        except OSError as error:
-            self._show_error(f"Could not load semantic level: {error}")
-            return
-        try:
-            level = Level.model_validate_json(raw_level)
-            self._validate_level_grid_dimensions(level)
-        except ValueError as error:
-            try:
-                draft = LevelDraft.model_validate_json(raw_level)
-            except ValueError:
-                self._show_error(f"Could not load semantic level: {error}")
-                return
-            self._level_draft = draft
-            self._recognition_summary.setText(
-                f"Loaded reviewed recognition draft from {path.name}. Create an editable semantic "
-                "level template below; this file is not itself a level.json."
-            )
-            self._recognition_view.setPlainText(
-                "Loaded draft labels:\n"
-                + "\n".join(
-                    f"({cell.cell.row}, {cell.cell.col}) {cell.label}"
-                    for cell in draft.resolved_cells
-                )
-            )
-            self._refresh_semantic_mapping_form()
-            self._update_semantic_controls()
-            return
-        self._level_editor.setPlainText(raw_level)
-        self._set_validated_level(level, path)
-
     def _validate_level_editor(self) -> Level | None:
         """Validate the editable semantic document before simulation or solving."""
         try:
@@ -1317,29 +575,6 @@ class CalibrationWindow(QMainWindow):
                 f"({level.rows}, {level.cols}) do not match calibrated grid "
                 f"({self._grid.rows}, {self._grid.cols})"
             )
-
-    def _save_level_editor(self) -> None:
-        """Persist the currently edited, validated semantic level from this window."""
-        level = self._validate_level_editor()
-        if level is None:
-            return
-        suggested = self._level_path or Path("level.json")
-        selected, _ = QFileDialog.getSaveFileName(
-            self,
-            "Save semantic level",
-            str(suggested),
-            "Level JSON (*.json)",
-        )
-        if not selected:
-            return
-        output_path = Path(selected).with_suffix(".json")
-        try:
-            save_level(level, output_path)
-        except OSError as error:
-            self._show_error(f"Could not save semantic level: {error}")
-            return
-        self._set_validated_level(level, output_path)
-        self._semantic_status.setText(f"Saved and validated semantic level to {output_path}")
 
     def _open_placement_dialog(self) -> None:
         """Load a portable placement for topology inspection or deterministic replay."""
@@ -1575,34 +810,14 @@ class CalibrationWindow(QMainWindow):
         self._solver_status.setText(f"Saved verified placement to {output_path}")
 
     def _update_semantic_controls(self) -> None:
-        """Enable each in-window stage only when its in-memory input exists."""
-        has_crops = bool(self._crops)
-        has_catalog = bool(self._catalog_templates)
-        has_report = self._recognition_report is not None
-        has_draft = self._level_draft is not None
-        has_level_text = bool(self._level_editor.toPlainText().strip())
+        """Enable formalization and solver actions from in-memory workflow state."""
+        annotations = self._cell_editor.annotations() if self._crops else ()
+        complete = bool(annotations) and all(
+            not annotation_errors(annotation, self._cell_types) for annotation in annotations
+        )
+        self._formalize_button.setEnabled(complete and bool(self._level_number.text().strip()))
+        has_level_text = self._level is not None and bool(self._level_editor.toPlainText().strip())
         has_placement_text = bool(self._placement_editor.toPlainText().strip())
-        has_template_fields = bool(self._template_label_editor.text().strip())
-        self._template_crop_selector.setEnabled(has_crops)
-        self._add_template_button.setEnabled(has_crops and has_template_fields)
-        self._remove_template_button.setEnabled(self._template_list.currentRow() >= 0)
-        self._save_catalog_button.setEnabled(has_catalog)
-        self._recognize_button.setEnabled(has_crops and has_catalog)
-        self._apply_overrides_button.setEnabled(has_report)
-        self._save_report_button.setEnabled(has_report)
-        self._save_overrides_button.setEnabled(has_report)
-        self._save_draft_button.setEnabled(has_draft)
-        self._build_level_from_labels_button.setEnabled(
-            self._level_draft is not None
-            and self._level_draft.is_complete
-            and bool(self._draft_cells("actor.train"))
-            and bool(self._draft_cells("goal.arrival"))
-        )
-        self._create_level_from_draft_button.setEnabled(
-            self._level_draft is not None and self._level_draft.is_complete
-        )
-        self._validate_level_button.setEnabled(has_level_text)
-        self._save_level_button.setEnabled(has_level_text)
         self._solve_button.setEnabled(has_level_text)
         self._load_placement_button.setEnabled(has_level_text)
         self._validate_placement_button.setEnabled(has_level_text and has_placement_text)
@@ -1619,6 +834,7 @@ class CalibrationWindow(QMainWindow):
         self._image = image
         self._image_path = path
         self._image_hash = image_sha256(path)
+        self._level_number.setText(_infer_level_number(path) or "")
         self._restore_default_dimensions()
         self._reset_points()
         self._canvas.fit_in_view()
@@ -1872,14 +1088,16 @@ class CalibrationWindow(QMainWindow):
         if self._image is None:
             next_step = "Open a screenshot to begin."
         elif self._crops:
-            if not self._catalog_templates:
-                next_step = "Open Review and solve, then create or load a template catalog."
-            elif self._recognition_report is None:
-                next_step = "Run recognition for the extracted cells with the loaded catalog."
-            elif self._level_draft is not None and not self._level_draft.is_complete:
-                next_step = "Review uncertain cells and apply recognition overrides."
+            incomplete = sum(
+                bool(annotation_errors(annotation, self._cell_types))
+                for annotation in self._cell_editor.annotations()
+            )
+            if incomplete:
+                next_step = f"Review the {incomplete} highlighted cell(s) in the Cells workspace."
+            elif self._level is None:
+                next_step = "Formalize the fully reviewed cell annotations."
             else:
-                next_step = "Build and validate the semantic level from the reviewed labels."
+                next_step = "Review the formal Level view or continue to solving."
         elif len(self._points) < len(_POINT_LABELS):
             if not self._points:
                 next_step = (
@@ -1970,8 +1188,15 @@ class CalibrationWindow(QMainWindow):
             self._image is not None
             and self._grid is not None
             and len(self._points) == len(_POINT_LABELS)
+            and bool(self._level_number.text().strip())
         )
         self._extract_button.setEnabled(ready)
+
+    def _level_number_changed(self) -> None:
+        if self._crops:
+            self._clear_extraction()
+        self._update_extraction_controls()
+        self._update_semantic_controls()
 
     def _clear_extraction(self) -> None:
         had_extraction = bool(self._crops)
@@ -1981,20 +1206,20 @@ class CalibrationWindow(QMainWindow):
         self._crop_summary.setVisible(had_extraction)
         self._crops = []
         self._crop_spec = None
-        self._crop_canvas.clear_image()
+        self._cell_editor.clear_cells()
         self._workspace_tabs.setTabEnabled(self._cells_tab_index, False)
-        if self._workspace_tabs.currentIndex() == self._cells_tab_index:
+        self._level_canvas.clear_image()
+        self._workspace_tabs.setTabEnabled(self._level_tab_index, False)
+        if self._workspace_tabs.currentIndex() in (self._cells_tab_index, self._level_tab_index):
             self._workspace_tabs.setCurrentIndex(0)
-        self._recognition_report = None
-        self._level_draft = None
+        self._level = None
+        self._level_path = None
+        self._rail_budget = None
         self._solver_result = None
-        self._recognition_summary.clear()
-        self._recognition_view.clear()
-        self._overrides_editor.setPlainText("[]")
+        self._level_editor.clear()
+        self._semantic_status.setText("Formalize the reviewed cells before solving.")
         self._save_solution_button.setEnabled(False)
         self._solver_trace.clear()
-        self._refresh_template_crop_choices()
-        self._refresh_semantic_mapping_form()
         self._update_semantic_controls()
         self._update_instruction()
 
@@ -2005,26 +1230,286 @@ class CalibrationWindow(QMainWindow):
         spec = _INTERACTIVE_CROP_SPEC
         try:
             crops = CellExtractor().extract(self._image, self._grid, spec)
-            contact_sheet = render_crop_contact_sheet(crops, columns=self._grid.cols)
-        except ValueError as error:
+            annotations = self._automatic_annotations(crops)
+        except (sqlite3.Error, ValueError) as error:
             self._show_error(f"Could not extract cells: {error}")
             return
 
         self._crops = crops
         self._crop_spec = spec
-        self._crop_canvas.set_image(_bgr_to_qimage(contact_sheet))
+        self._cell_editor.set_cells(
+            crops=crops,
+            annotations=annotations,
+            definitions=self._cell_types,
+            columns=self._grid.cols,
+        )
         self._workspace_tabs.setTabEnabled(self._cells_tab_index, True)
         self._workspace_tabs.setCurrentIndex(self._cells_tab_index)
-        self._crop_canvas.fit_in_view()
-        self._refresh_template_crop_choices()
+        recognized = sum(annotation.source == "automatic" for annotation in annotations)
         self._crop_summary.setText(
-            f"{len(crops)} cells ready in memory · {spec.output_size} × {spec.output_size} px"
+            f"{recognized}/{len(crops)} recognized · {spec.output_size} × {spec.output_size} px"
         )
         self._crop_summary.show()
-        self._log_activity("Grid calibrated and cells extracted in memory.")
+        self._log_activity(
+            f"Extracted {len(crops)} cells; recognized {recognized} from confirmed samples."
+        )
         self._update_extraction_controls()
         self._update_semantic_controls()
         self._update_instruction()
+
+    def _automatic_annotations(
+        self,
+        crops: list[CellCrop],
+        *,
+        preserve_manual: bool = False,
+    ) -> tuple[CellAnnotation, ...]:
+        """Recognize cells from the local confirmed-sample library."""
+        level_number = self._level_number.text().strip()
+        existing = {
+            (annotation.cell.row, annotation.cell.col): annotation
+            for annotation in self._cell_editor.annotations()
+            if preserve_manual and annotation.source == "manual"
+        }
+        samples = self._annotation_store.samples()
+        recognizer: TemplateRecognizer | None = None
+        samples_by_id = {sample.id: sample for sample in samples}
+        if samples:
+            catalog = TemplateCatalog(
+                templates=tuple(
+                    TemplateDefinition(
+                        id=sample.id,
+                        label=sample.type_id,
+                        image=f"database/{sample.id}.png",
+                    )
+                    for sample in samples
+                )
+            )
+            recognizer = TemplateRecognizer(
+                catalog,
+                tuple(
+                    Template(definition=definition, image=sample.image)
+                    for definition, sample in zip(catalog.templates, samples, strict=True)
+                ),
+            )
+
+        annotations: list[CellAnnotation] = []
+        for crop in crops:
+            key = (crop.cell.row, crop.cell.col)
+            if key in existing:
+                annotations.append(existing[key])
+                continue
+            annotation_id = make_cell_annotation_id(level_number, crop.cell)
+            if recognizer is None:
+                annotations.append(CellAnnotation(id=annotation_id, cell=crop.cell))
+                continue
+            observation = recognizer.recognize(crop)
+            if observation.status is not RecognitionStatus.ACCEPTED:
+                annotations.append(CellAnnotation(id=annotation_id, cell=crop.cell))
+                continue
+            candidate = observation.candidates[0]
+            definition = self._cell_types.get(candidate.label)
+            sample = samples_by_id.get(candidate.template_id)
+            if definition is None or sample is None:
+                annotations.append(CellAnnotation(id=annotation_id, cell=crop.cell))
+                continue
+            properties = rotate_annotation_properties(
+                sample.properties,
+                definition,
+                candidate.rotation_degrees,
+            )
+            annotations.append(
+                CellAnnotation(
+                    id=annotation_id,
+                    cell=crop.cell,
+                    type_id=definition.id,
+                    properties=properties,
+                    source="automatic",
+                    confidence=observation.confidence,
+                )
+            )
+        return tuple(annotations)
+
+    def _cell_annotation_changed(self, annotation: CellAnnotation) -> None:
+        """Persist complete manual evidence and refresh unresolved automatic matches."""
+        try:
+            self._annotation_store.delete_sample(annotation.id)
+            if annotation.source == "manual" and not annotation_value_errors(
+                annotation, self._cell_types
+            ):
+                crop = self._cell_editor.crop_for(annotation.cell)
+                if crop is not None:
+                    self._annotation_store.save_manual_sample(annotation, crop)
+            self._refresh_automatic_annotations()
+        except (OSError, sqlite3.Error, ValueError) as error:
+            self._show_error(f"Could not update the confirmed cell sample: {error}")
+            return
+        self._update_annotation_summary()
+
+    def _refresh_automatic_annotations(self) -> None:
+        if not self._crops:
+            return
+        for annotation in self._automatic_annotations(self._crops, preserve_manual=True):
+            self._cell_editor.set_annotation(annotation)
+
+    def _update_annotation_summary(self) -> None:
+        annotations = self._cell_editor.annotations()
+        complete = sum(
+            not annotation_errors(annotation, self._cell_types) for annotation in annotations
+        )
+        automatic = sum(annotation.source == "automatic" for annotation in annotations)
+        self._crop_summary.setText(
+            f"{complete}/{len(annotations)} ready · {automatic} recognized automatically"
+        )
+        self._update_semantic_controls()
+        self._update_instruction()
+
+    def _create_cell_type(self, cell: object) -> None:
+        """Create a reusable type contextually and assign it to the requesting cell."""
+        if not isinstance(cell, CellCoord):
+            return
+        display_name, accepted = QInputDialog.getText(
+            self,
+            "New cell type",
+            "Type name",
+        )
+        display_name = display_name.strip()
+        if not accepted or not display_name:
+            return
+        role_labels = {
+            "Empty / buildable": "empty",
+            "Obstacle / blocked": "obstacle",
+            "Train / actor": "train",
+            "Arrival goal": "goal",
+            "New mechanic (not formalized yet)": "unmodeled",
+        }
+        role_label, accepted = QInputDialog.getItem(
+            self,
+            "Cell type role",
+            "Graph-state role",
+            tuple(role_labels),
+            editable=False,
+        )
+        if not accepted:
+            return
+        base_id = f"custom.{_identifier_fragment(display_name)}"
+        type_id = base_id
+        suffix = 2
+        while type_id in self._cell_types:
+            type_id = f"{base_id}-{suffix}"
+            suffix += 1
+        definition = cell_type_for_role(
+            type_id=type_id,
+            display_name=display_name,
+            role=cast(
+                Literal["empty", "obstacle", "train", "goal", "unmodeled"],
+                role_labels[role_label],
+            ),
+        )
+        try:
+            self._annotation_store.save_cell_type(definition)
+        except (OSError, sqlite3.Error, ValueError) as error:
+            self._show_error(f"Could not store the new cell type: {error}")
+            return
+        self._cell_types[definition.id] = definition
+        self._cell_editor.set_definitions(self._cell_types)
+        annotation = CellAnnotation(
+            id=make_cell_annotation_id(self._level_number.text(), cell),
+            cell=cell,
+            type_id=definition.id,
+            source="manual",
+        )
+        self._cell_editor.set_annotation(annotation)
+        self._cell_annotation_changed(annotation)
+
+    def _formalize_level(self) -> None:
+        """Compile complete visual annotations and display their formal Level projection."""
+        annotations = self._cell_editor.annotations()
+        if not annotations or self._grid is None:
+            self._show_error("Extract and review the cells before formalizing the level.")
+            return
+        invalid = [
+            f"({item.cell.row}, {item.cell.col}): {', '.join(annotation_errors(item, self._cell_types))}"
+            for item in annotations
+            if annotation_errors(item, self._cell_types)
+        ]
+        if invalid:
+            self._show_error("Complete every highlighted cell first. " + "; ".join(invalid))
+            return
+        rail_budget, accepted = QInputDialog.getInt(
+            self,
+            "Formalize level",
+            "Available rails",
+            self._rail_budget or 0,
+            0,
+            10_000,
+        )
+        if not accepted:
+            return
+        goal_assignments = self._request_goal_assignments(annotations)
+        if goal_assignments is None:
+            return
+        try:
+            level = formalize_annotations(
+                level_number=self._level_number.text(),
+                rows=self._grid.rows,
+                cols=self._grid.cols,
+                rail_budget=rail_budget,
+                annotations=annotations,
+                definitions=self._cell_types,
+                goal_assignments=goal_assignments,
+            )
+        except ValueError as error:
+            self._show_error(f"Could not formalize the level: {error}")
+            return
+        self._rail_budget = rail_budget
+        self._level_path = None
+        self._level_editor.setPlainText(level.model_dump_json(indent=2))
+        self._set_validated_level(level, None)
+        self._level_canvas.set_image(_bgr_to_qimage(render_level_schematic(level)))
+        self._workspace_tabs.setTabEnabled(self._level_tab_index, True)
+        self._workspace_tabs.setCurrentIndex(self._level_tab_index)
+        self._level_canvas.fit_in_view()
+        self._log_activity(f"Formalized {level.id!r} from {len(annotations)} reviewed cells.")
+        self._update_semantic_controls()
+        self._update_instruction()
+
+    def _request_goal_assignments(
+        self, annotations: tuple[CellAnnotation, ...]
+    ) -> dict[str, CellCoord] | None:
+        actors = [
+            annotation
+            for annotation in annotations
+            if annotation.type_id is not None
+            and any(
+                isinstance(feature, ActorFeature)
+                for feature in self._cell_types[annotation.type_id].features
+            )
+        ]
+        goals = [
+            annotation.cell
+            for annotation in annotations
+            if annotation.type_id is not None
+            and any(
+                isinstance(feature, GoalFeature)
+                for feature in self._cell_types[annotation.type_id].features
+            )
+        ]
+        if len(goals) <= 1:
+            return {}
+        choices = tuple(f"r{goal.row:03d} · c{goal.col:03d}" for goal in goals)
+        assignments: dict[str, CellCoord] = {}
+        for actor in actors:
+            choice, accepted = QInputDialog.getItem(
+                self,
+                "Choose arrival goal",
+                f"Goal for r{actor.cell.row:03d} · c{actor.cell.col:03d}",
+                choices,
+                editable=False,
+            )
+            if not accepted:
+                return None
+            assignments[actor.id] = goals[choices.index(choice)]
+        return assignments
 
     def _show_error(self, message: str) -> None:
         self._log_activity(f"Error: {message}")
@@ -2062,50 +1547,23 @@ def run_calibration_gui(
     return 0
 
 
-def _cell_document(cell: CellCoord) -> dict[str, int]:
-    """Return one portable coordinate object for a generated level document."""
-    return {"row": cell.row, "col": cell.col}
+def _annotation_store_path() -> Path:
+    """Return the platform-local database path used by the interactive library."""
+    location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+    base = Path(location) if location else Path.cwd() / ".railbound"
+    return base / "cell-annotations.sqlite3"
 
 
-def _semantic_level_template(draft: LevelDraft) -> dict[str, object]:
-    """Build an editable M4 document while retaining only unambiguous terrain labels.
+def _infer_level_number(path: Path) -> str | None:
+    """Extract a conventional world-level number from a screenshot filename."""
+    match = re.search(r"(?<!\d)(\d+)[-_](\d+)(?!\d)", path.stem)
+    return None if match is None else f"{match.group(1)}-{match.group(2)}"
 
-    Recognition cannot establish train direction, rail ports, placeability,
-    inventory, or objectives.  Those fields remain deliberately empty for the
-    reviewer instead of being guessed from image evidence.
-    """
-    terrain: list[dict[str, object]] = []
-    for resolved in draft.resolved_cells:
-        if not resolved.label.startswith("terrain."):
-            continue
-        terrain.append(
-            {
-                "cell": {"row": resolved.cell.row, "col": resolved.cell.col},
-                "kind": resolved.label,
-            }
-        )
-    return {
-        "schema_version": 1,
-        "ruleset_version": "railbound-observed-v1",
-        "id": "reviewed-level",
-        "metadata": {"source": "recognition-review"},
-        "rows": draft.source.rows,
-        "cols": draft.source.cols,
-        "terrain": terrain,
-        "buildable_cells": [],
-        "fixed_tracks": [],
-        "actors": [],
-        "switches": [],
-        "buttons": [],
-        "gates": [],
-        "tunnel_endpoints": [],
-        "rail_inventory": {"total_budget": 0},
-        "win_condition": {
-            "required_arrivals": [],
-            "arrival_order": [],
-            "required_couplings": [],
-        },
-    }
+
+def _identifier_fragment(value: str) -> str:
+    """Convert a display name into a stable identifier fragment."""
+    fragment = re.sub(r"[^A-Za-z0-9_.:-]+", "-", value.strip().lower()).strip("-.")
+    return fragment or "cell-type"
 
 
 def _event_summary(event: SimulationEvent) -> str:
