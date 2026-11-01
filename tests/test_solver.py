@@ -6,7 +6,9 @@ from railbound.geometry import CellCoord
 from railbound.level import Level, Port
 from railbound.simulation import SimulationStatus, simulate
 from railbound.solver import (
+    CandidateOutcome,
     SolverLimits,
+    SolverProgress,
     SolverStatus,
     iter_placement_candidates,
     solve,
@@ -127,6 +129,28 @@ def test_solver_finds_the_only_legal_horizontal_placement() -> None:
     )
     assert result.simulation is not None
     assert simulate(level, result.placement).succeeded
+
+
+def test_solver_reports_partial_and_complete_progress_through_success() -> None:
+    level = _straight_line_level(
+        buildable_cells=[(0, 1)],
+        rail_inventory={
+            "total_budget": 1,
+            "piece_counts": [{"piece_kind": "straight", "count": 1}],
+        },
+    )
+    progress: list[SolverProgress] = []
+
+    result = solve(level, progress_observer=progress.append)
+
+    assert result.solved
+    assert progress
+    assert progress[-1].outcome is CandidateOutcome.SUCCEEDED
+    assert progress[-1].placement == result.placement
+    assert progress[-1].placements_considered == result.statistics.placements_considered
+    assert any(item.outcome is CandidateOutcome.BRANCH_PRUNED for item in progress)
+    assert progress[-1].branches_pruned == result.statistics.connectivity_branches_pruned
+    assert any(item.outcome is not CandidateOutcome.SUCCEEDED for item in progress[:-1])
 
 
 def test_solver_uses_stable_tie_breaking_for_multiple_solutions() -> None:

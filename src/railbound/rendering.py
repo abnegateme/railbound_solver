@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import cast
 
 import cv2
@@ -10,6 +11,7 @@ from numpy.typing import NDArray
 
 from railbound.geometry import CellCoord, GridGeometry, PixelPoint
 from railbound.level import Direction, Level, Port
+from railbound.topology import RailPlacement, rail_piece_transitions, validate_placement
 
 ColorImage = NDArray[np.uint8]
 
@@ -22,6 +24,8 @@ _SCHEMATIC_GRID = (180, 176, 186)
 _SCHEMATIC_BUILDABLE = (232, 225, 243)
 _SCHEMATIC_BLOCKED = (95, 91, 100)
 _SCHEMATIC_TRACK = (55, 52, 58)
+_SCHEMATIC_SOLUTION_TRACK = (190, 92, 54)
+_SCHEMATIC_OPEN_CELL = (40, 150, 220)
 _SCHEMATIC_GOAL = (70, 150, 80)
 _SCHEMATIC_ACTOR = (164, 80, 35)
 
@@ -141,6 +145,70 @@ def render_level_schematic(level: Level, *, cell_size: int = 72) -> ColorImage:
                 cv2.LINE_AA,
             )
 
+    _draw_schematic_entities(image, level, padding, cell_size)
+    return image
+
+
+def render_placement_schematic(
+    level: Level,
+    placement: RailPlacement,
+    *,
+    cell_size: int = 72,
+    open_cells: Iterable[CellCoord] = (),
+) -> ColorImage:
+    """Render assigned rails and unresolved selected cells for one search state."""
+    validate_placement(level, placement)
+    image = render_level_schematic(level, cell_size=cell_size)
+    padding = 12
+    pending = tuple(open_cells)
+    unknown = set(pending) - set(level.buildable_cells)
+    if unknown:
+        raise ValueError("open search cells must belong to the buildable grid")
+    inset = max(4, cell_size // 10)
+    for cell in pending:
+        top_left = (
+            padding + cell.col * cell_size + inset,
+            padding + cell.row * cell_size + inset,
+        )
+        bottom_right = (
+            padding + (cell.col + 1) * cell_size - inset,
+            padding + (cell.row + 1) * cell_size - inset,
+        )
+        cv2.rectangle(
+            image,
+            top_left,
+            bottom_right,
+            _SCHEMATIC_OPEN_CELL,
+            3,
+            cv2.LINE_AA,
+        )
+    for rail in placement.rails:
+        center = _schematic_center(rail.cell, padding, cell_size)
+        ports = {
+            port
+            for transition in rail_piece_transitions(rail.piece_kind, rail.orientation)
+            for port in (transition.entry_port, transition.exit_port)
+        }
+        for port in ports:
+            cv2.line(
+                image,
+                center,
+                _schematic_port(rail.cell, port, padding, cell_size),
+                _SCHEMATIC_SOLUTION_TRACK,
+                7,
+                cv2.LINE_AA,
+            )
+        cv2.circle(image, center, 5, _SCHEMATIC_SOLUTION_TRACK, thickness=-1, lineType=cv2.LINE_AA)
+    _draw_schematic_entities(image, level, padding, cell_size)
+    return image
+
+
+def _draw_schematic_entities(
+    image: ColorImage,
+    level: Level,
+    padding: int,
+    cell_size: int,
+) -> None:
     goal_cells = {arrival.target_cell for arrival in level.win_condition.required_arrivals}
     for cell in goal_cells:
         cv2.circle(
@@ -177,7 +245,6 @@ def render_level_schematic(level: Level, *, cell_size: int = 72) -> ColorImage:
             2,
             cv2.LINE_AA,
         )
-    return image
 
 
 def _validate_image_dimensions(image: NDArray[np.uint8], grid: GridGeometry) -> None:

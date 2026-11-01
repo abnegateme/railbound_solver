@@ -5,9 +5,15 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from railbound.geometry import GridGeometry, PixelPoint
+from railbound.geometry import CellCoord, GridGeometry, PixelPoint
 from railbound.level_io import load_level
-from railbound.rendering import render_grid_overlay, render_level_schematic
+from railbound.placement_io import load_placement
+from railbound.rendering import (
+    render_grid_overlay,
+    render_level_schematic,
+    render_placement_schematic,
+)
+from railbound.topology import RailPlacement
 
 
 def test_overlay_retains_source_dimensions_and_marks_all_centers() -> None:
@@ -54,3 +60,32 @@ def test_level_schematic_uses_formal_grid_dimensions() -> None:
 
     assert image.shape == (24 + level.rows * 48, 24 + level.cols * 48, 3)
     assert np.unique(image.reshape(-1, 3), axis=0).shape[0] > 3
+
+
+def test_placement_schematic_adds_the_validated_candidate() -> None:
+    data = Path(__file__).parents[1] / "data"
+    level = load_level(data / "example-level.json")
+    placement = load_placement(data / "example-placement.json")
+
+    level_image = render_level_schematic(level, cell_size=48)
+    candidate_image = render_placement_schematic(level, placement, cell_size=48)
+
+    assert candidate_image.shape == level_image.shape
+    assert np.any(candidate_image != level_image)
+
+
+def test_placement_schematic_marks_unresolved_search_cells() -> None:
+    level = load_level(Path(__file__).parents[1] / "data" / "example-level.json")
+    placement = RailPlacement(level_id=level.id)
+    open_cell = min(level.buildable_cells, key=lambda cell: (cell.row, cell.col))
+
+    level_image = render_level_schematic(level, cell_size=48)
+    search_image = render_placement_schematic(
+        level,
+        placement,
+        cell_size=48,
+        open_cells=(CellCoord(row=open_cell.row, col=open_cell.col),),
+    )
+
+    assert search_image.shape == level_image.shape
+    assert np.any(search_image != level_image)

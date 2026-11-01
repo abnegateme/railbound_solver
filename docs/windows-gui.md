@@ -30,7 +30,7 @@ cannot establish a reliable grid. GUI calibration belongs to the current
 screenshot session and is consumed directly by **Extract cells**; it
 is not saved separately.
 
-The **Grid and cells** tab is the complete parsing workflow. Enter the level
+The **Workflow** tab is the complete interactive flow. Enter the level
 number first; a conventional number such as `1-13` is inferred from the
 screenshot filename when possible. Cell IDs then combine that number with
 zero-based row and column coordinates.
@@ -47,15 +47,24 @@ exported.
 **Formalize level** becomes available only when every cell has a complete type
 whose graph-state compiler is implemented. It asks for the rail budget and,
 only when necessary, the target goal for each train. The resulting validated
-`Level` remains in memory and opens in the schematic **Level** workspace.
+`Level` remains in memory and immediately opens as a schematic in the third
+workspace, **Level / solution**; it has no separate text editor.
 Recognizable new mechanics may be recorded without data loss, but they remain
 visibly blocked from formalization until their topology/state compiler exists;
 they are never silently ignored.
 
-The **Solve** tab consumes that in-memory formal level. It can inspect or replay
-a `placement.json`, run the solver, show the verified trace, and save the
-resulting placement. Pruning and runtime caching are automatic and add no extra
-controls.
+**Solve level** is on the same **Workflow** tab. During search, the third
+workspace redraws sampled states from the actual search tree: assigned rails,
+outlined cells still awaiting a piece assignment, complete failures, and the
+verified solution. This includes partial branches rejected before they become
+complete placements. The GUI plays a bounded sample queue at a visible rate,
+so fast searches still animate without making large searches take minutes.
+Search runs in a worker thread; images are delivered back to Qt through queued
+signals, so the window remains responsive. Search statistics and the replay
+trace go to the activity log; the placement can be saved beside the button.
+The optional **Placement** tab can inspect or replay a `placement.json`, and a
+successful replay uses the same visual workspace. Pruning, bounds, and runtime
+caching use the interactive defaults and add no extra controls.
 
 The host environment is only a local GUI runtime, not an installer. Its
 desktop access must remain outside the devcontainer.

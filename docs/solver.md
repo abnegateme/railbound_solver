@@ -38,10 +38,18 @@ The Windows-host `interactive` command opens the one primary session, rather
 than a separate solver window. The visual **Cells** workspace continues from
 the calibrated screenshot and in-memory crops. Once every cell is reviewed,
 **Formalize level** compiles the annotations into the validated in-memory
-`Level` used by the **Solve** tab. Limits, solve, trace inspection, and
-placement save all happen there. The same tab can load or paste a manual
-`placement.json`, inspect its M5 port graph, and replay it through M6–M7 before
-invoking the search.
+`Level`. **Solve level** remains on the same **Workflow** tab and uses the
+interactive search bounds. Formalization opens the schematic **Level /
+solution** workspace; while solving, that workspace samples the real stream of
+partial branches, failed candidates, and successful placements. Assigned rails
+are drawn directly, while outlined cells show the unresolved remainder of a
+partial branch. The verified solution remains after playback.
+The search runs outside the Qt GUI thread and sends sampled progress through
+queued signals. A bounded GUI-side queue plays those samples at a visible pace,
+including when the search itself finishes faster than Qt can repaint. Statistics
+and the replay trace are appended to the activity log. The optional
+**Placement** tab can load or paste a manual `placement.json`, inspect its M5
+port graph, and replay it through M6–M7.
 
 The result includes the successful placement, its `SimulationResult`, the
 same ordered event trace in `result.trace`, and `SearchStats`. When no
@@ -52,9 +60,8 @@ The interactive session enables the M10 search policy automatically. It uses
 forced buildable cells, optimistic port-connectivity pruning, canonical rail
 rotations, deterministic heuristic ordering, and a per-placement runtime-state
 cache. These optimizations can only discard candidates that cannot succeed;
-every reported solution is still replayed by the simulator. The GUI keeps the
-controls unchanged and reports replay, pruning, cache, and elapsed-time totals
-in the result pane.
+every reported solution is still replayed by the simulator. The GUI reports
+replay, pruning, cache, and elapsed-time totals in the activity log.
 
 ## Deterministic candidate order
 

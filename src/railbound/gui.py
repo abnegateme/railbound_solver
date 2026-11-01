@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from collections import deque
 from math import floor, hypot
 from pathlib import Path
+from time import monotonic
 from typing import Literal, cast
 
 import cv2
-from PySide6.QtCore import QStandardPaths, Qt, Signal
+from PySide6.QtCore import QObject, QStandardPaths, QThread, QTimer, Qt, Signal, Slot
 from PySide6.QtGui import (
     QAction,
     QColor,
+    QCloseEvent,
     QImage,
     QMouseEvent,
     QPainter,
@@ -22,9 +25,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
-    QCheckBox,
     QFileDialog,
-    QFormLayout,
     QFrame,
     QGraphicsPixmapItem,
     QGraphicsScene,
@@ -47,6 +48,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from railbound.annotation_gui import CellAnnotationGrid
+from railbound.annotation_store import AnnotationStore
 from railbound.calibration import (
     GridIntersectionPoint,
     grid_from_four_intersections,
@@ -54,8 +57,6 @@ from railbound.calibration import (
     grid_from_three_intersections,
     image_sha256,
 )
-from railbound.annotation_gui import CellAnnotationGrid
-from railbound.annotation_store import AnnotationStore
 from railbound.cell_annotation import (
     ActorFeature,
     CellAnnotation,
@@ -85,9 +86,21 @@ from railbound.recognition import (
     TemplateDefinition,
     TemplateRecognizer,
 )
-from railbound.rendering import ColorImage, render_grid_overlay, render_level_schematic
+from railbound.rendering import (
+    ColorImage,
+    render_grid_overlay,
+    render_level_schematic,
+    render_placement_schematic,
+)
 from railbound.simulation import SimulationEvent, SimulationOptions, simulate
-from railbound.solver import SolverLimits, SolverResult, SolverStatus, solve
+from railbound.solver import (
+    CandidateOutcome,
+    SolverLimits,
+    SolverProgress,
+    SolverResult,
+    SolverStatus,
+    solve,
+)
 from railbound.topology import (
     CompiledBoard,
     PortNode,
@@ -102,6 +115,13 @@ _DEFAULT_ROWS = 8
 _DEFAULT_COLS = 10
 _DIMENSION_CONTROL_WIDTH = 72
 _INTERSECTION_SELECTION_MAX_AXIS_FRACTION = 0.4
+_INTERACTIVE_MAX_PLACEMENTS = 10_000
+_INTERACTIVE_MAX_TICKS = 10_000
+_SEARCH_PREVIEW_LIVE_INTERVAL_SECONDS = 0.05
+_SEARCH_PREVIEW_FRAME_INTERVAL_MS = 50
+_SEARCH_PREVIEW_INITIAL_STEPS = 20
+_SEARCH_PREVIEW_SEARCH_STEP = 500
+_SEARCH_PREVIEW_BUFFER_SIZE = 60
 _INTERACTIVE_CROP_SPEC = CropSpec(
     output_size=96,
     core_fraction=0.8,
@@ -204,6 +224,59 @@ _POINT_LABELS = (
 )
 
 
+class _SolverWorker(QObject):
+    """Run deterministic search off the GUI thread and emit sampled progress."""
+
+    progress = Signal(object)
+    result_ready = Signal(object)
+    failed = Signal(str)
+    finished = Signal()
+
+    def __init__(self, level: Level) -> None:
+        super().__init__()
+        self._level = level
+
+    @Slot()
+    def run(self) -> None:
+        last_preview_at = float("-inf")
+        last_preview_step = 0
+        last_progress: SolverProgress | None = None
+        last_emitted: SolverProgress | None = None
+
+        def observe(progress: SolverProgress) -> None:
+            nonlocal last_preview_at, last_preview_step, last_progress, last_emitted
+            last_progress = progress
+            now = monotonic()
+            if (
+                progress.outcome is not CandidateOutcome.SUCCEEDED
+                and progress.search_steps > _SEARCH_PREVIEW_INITIAL_STEPS
+                and progress.search_steps - last_preview_step < _SEARCH_PREVIEW_SEARCH_STEP
+                and now - last_preview_at < _SEARCH_PREVIEW_LIVE_INTERVAL_SECONDS
+            ):
+                return
+            self.progress.emit(progress)
+            last_emitted = progress
+            last_preview_at = now
+            last_preview_step = progress.search_steps
+
+        try:
+            result = solve(
+                self._level,
+                SolverLimits(
+                    max_placements=_INTERACTIVE_MAX_PLACEMENTS,
+                    max_ticks=_INTERACTIVE_MAX_TICKS,
+                ),
+                progress_observer=observe,
+            )
+            if last_progress is not None and last_progress != last_emitted:
+                self.progress.emit(last_progress)
+            self.result_ready.emit(result)
+        except Exception as error:
+            self.failed.emit(f"{type(error).__name__}: {error}")
+        finally:
+            self.finished.emit()
+
+
 class CalibrationCanvas(QGraphicsView):
     """A zoomable image canvas that reports clicks in source-image pixels."""
 
@@ -285,6 +358,14 @@ class CalibrationWindow(QMainWindow):
         self._placement_path: Path | None = None
         self._solver_result: SolverResult | None = None
         self._solution_output_path: Path | None = None
+        self._solver_thread: QThread | None = None
+        self._solver_worker: _SolverWorker | None = None
+        self._solving_level: Level | None = None
+        self._solver_previews: deque[SolverProgress] = deque(maxlen=_SEARCH_PREVIEW_BUFFER_SIZE)
+        self._pending_solver_result: SolverResult | None = None
+        self._solver_preview_timer = QTimer(self)
+        self._solver_preview_timer.setInterval(_SEARCH_PREVIEW_FRAME_INTERVAL_MS)
+        self._solver_preview_timer.timeout.connect(self._advance_solver_preview)
 
         self.setWindowTitle("Railbound Solver — Parse, review, and solve")
         self.resize(1240, 820)
@@ -312,17 +393,28 @@ class CalibrationWindow(QMainWindow):
         else:
             self._update_instruction()
 
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Keep the worker alive until its active search has finished."""
+        if self._solver_thread is not None and self._solver_thread.isRunning():
+            self._solver_status.setText(
+                "Search is still running; the window can be closed when it finishes."
+            )
+            self._log_activity("Wait for the active search to finish before closing the window.")
+            event.ignore()
+            return
+        super().closeEvent(event)
+
     def _build_ui(self) -> None:
-        open_action = QAction("Open screenshot…", self)
-        open_action.triggered.connect(self._open_image_dialog)
+        self._open_action = QAction("Open screenshot…", self)
+        self._open_action.triggered.connect(self._open_image_dialog)
         toolbar = QToolBar("Calibration", self)
-        toolbar.addAction(open_action)
+        toolbar.addAction(self._open_action)
         self.addToolBar(toolbar)
 
-        calibration_controls = QWidget()
-        calibration_controls.setMinimumWidth(300)
-        calibration_controls.setStyleSheet(_CALIBRATION_CARD_STYLE)
-        layout = QVBoxLayout(calibration_controls)
+        self._workflow_controls = QWidget()
+        self._workflow_controls.setMinimumWidth(300)
+        self._workflow_controls.setStyleSheet(_CALIBRATION_CARD_STYLE)
+        layout = QVBoxLayout(self._workflow_controls)
 
         calibration_card = QFrame()
         calibration_card.setObjectName("calibrationCard")
@@ -404,6 +496,32 @@ class CalibrationWindow(QMainWindow):
         cells_layout.addWidget(self._crop_summary)
         layout.addWidget(cells_card)
 
+        solution_card = QFrame()
+        solution_card.setObjectName("cellsCard")
+        solution_card.setAccessibleName("Solution")
+        solution_layout = QVBoxLayout(solution_card)
+        solution_layout.setContentsMargins(12, 10, 12, 12)
+        solution_layout.setSpacing(8)
+        solution_title = QLabel("Solution")
+        solution_title.setObjectName("calibrationTitle")
+        solution_layout.addWidget(solution_title)
+        self._solve_button = QPushButton("Solve level")
+        self._solve_button.setObjectName("primaryAction")
+        self._solve_button.clicked.connect(self._solve_level)
+        self._save_solution_button = QPushButton("Save placement…")
+        self._save_solution_button.setObjectName("secondaryAction")
+        self._save_solution_button.setEnabled(False)
+        self._save_solution_button.clicked.connect(self._save_solution)
+        solution_actions = QHBoxLayout()
+        solution_actions.addWidget(self._solve_button)
+        solution_actions.addWidget(self._save_solution_button)
+        solution_layout.addLayout(solution_actions)
+        self._solver_status = QLabel("Formalize the reviewed cells before solving.")
+        self._solver_status.setObjectName("cellsSummary")
+        self._solver_status.setWordWrap(True)
+        solution_layout.addWidget(self._solver_status)
+        layout.addWidget(solution_card)
+
         layout.addStretch()
 
         activity = QWidget()
@@ -422,13 +540,13 @@ class CalibrationWindow(QMainWindow):
         self._workspace_tabs = QTabWidget()
         self._workspace_tabs.addTab(self._canvas, "Screenshot")
         self._cells_tab_index = self._workspace_tabs.addTab(self._cell_editor, "Cells")
-        self._level_tab_index = self._workspace_tabs.addTab(self._level_canvas, "Level")
+        self._level_tab_index = self._workspace_tabs.addTab(self._level_canvas, "Level / solution")
         self._workspace_tabs.setTabEnabled(self._cells_tab_index, False)
         self._workspace_tabs.setTabEnabled(self._level_tab_index, False)
         content_layout.addWidget(self._workspace_tabs, stretch=1)
         tabs = QTabWidget()
-        tabs.addTab(calibration_controls, "Grid and cells")
-        tabs.addTab(self._build_review_and_solver_tab(), "Solve")
+        tabs.addTab(self._workflow_controls, "Workflow")
+        tabs.addTab(self._build_placement_tab(), "Placement")
 
         sidebar = QWidget()
         sidebar.setMinimumWidth(360)
@@ -440,18 +558,10 @@ class CalibrationWindow(QMainWindow):
         self.setCentralWidget(content)
         self._update_extraction_controls()
 
-    def _build_review_and_solver_tab(self) -> QScrollArea:
-        """Build only controls that consume an already formalized in-memory level."""
+    def _build_placement_tab(self) -> QScrollArea:
+        """Build optional controls for inspecting a placement document."""
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.addWidget(QLabel("Formal level"))
-        self._level_editor = QPlainTextEdit()
-        self._level_editor.hide()
-        self._level_editor.textChanged.connect(self._level_editor_changed)
-        self._semantic_status = QLabel("Formalize the reviewed cells before solving.")
-        self._semantic_status.setWordWrap(True)
-        layout.addWidget(self._semantic_status)
-
         layout.addWidget(QLabel("Placement inspection and replay"))
         self._load_placement_button = QPushButton("Open placement.json…")
         self._load_placement_button.clicked.connect(self._open_placement_dialog)
@@ -483,38 +593,6 @@ class CalibrationWindow(QMainWindow):
         layout.addWidget(self._placement_status)
         layout.addWidget(self._placement_inspection_output)
 
-        layout.addWidget(QLabel("Solver"))
-        self._max_placements = QSpinBox()
-        self._max_placements.setRange(0, 10_000_000)
-        self._max_placements.setValue(10_000)
-        self._max_ticks = QSpinBox()
-        self._max_ticks.setRange(1, 10_000_000)
-        self._max_ticks.setValue(10_000)
-        self._limit_rails = QCheckBox("Limit candidate rail count")
-        self._max_rails = QSpinBox()
-        self._max_rails.setRange(0, 10_000)
-        self._max_rails.setEnabled(False)
-        self._limit_rails.toggled.connect(self._max_rails.setEnabled)
-        solver_form = QFormLayout()
-        solver_form.addRow("Maximum placements", self._max_placements)
-        solver_form.addRow("Maximum ticks per placement", self._max_ticks)
-        solver_form.addRow("", self._limit_rails)
-        solver_form.addRow("Maximum rails", self._max_rails)
-        self._solve_button = QPushButton("Solve validated level")
-        self._solve_button.clicked.connect(self._solve_level)
-        self._save_solution_button = QPushButton("Save verified placement…")
-        self._save_solution_button.setEnabled(False)
-        self._save_solution_button.clicked.connect(self._save_solution)
-        self._solver_status = QLabel()
-        self._solver_status.setWordWrap(True)
-        self._solver_trace = QPlainTextEdit()
-        self._solver_trace.setReadOnly(True)
-        self._solver_trace.setMinimumHeight(220)
-        layout.addLayout(solver_form)
-        layout.addWidget(self._solve_button)
-        layout.addWidget(self._save_solution_button)
-        layout.addWidget(self._solver_status)
-        layout.addWidget(self._solver_trace)
         layout.addStretch()
 
         scroll = QScrollArea()
@@ -527,42 +605,20 @@ class CalibrationWindow(QMainWindow):
         """Return the latest result produced inside this interactive session."""
         return self._solver_result
 
-    def _validate_level_editor(self) -> Level | None:
-        """Validate the editable semantic document before simulation or solving."""
-        try:
-            level = Level.model_validate_json(self._level_editor.toPlainText())
-            self._validate_level_grid_dimensions(level)
-        except ValueError as error:
-            self._show_error(f"Semantic level is invalid: {error}")
-            return None
-        self._set_validated_level(level, self._level_path)
-        return level
-
-    def _level_editor_changed(self) -> None:
-        """Invalidate results whenever the authoritative document changes."""
-        self._level = None
+    def _set_validated_level(self, level: Level, path: Path | None) -> None:
+        """Adopt one validated level and invalidate any prior solver result."""
+        self._validate_level_grid_dimensions(level)
+        self._level = level
+        self._level_path = path
         self._placement = None
         self._placement_path = None
         self._solver_result = None
         self._save_solution_button.setEnabled(False)
-        self._solver_trace.clear()
+        self._clear_level_view()
+        self._placement_editor.clear()
         self._placement_inspection_output.clear()
-        self._semantic_status.setText("Semantic level changed; validate it before solving.")
-        self._placement_status.setText("Validate the semantic level before using this placement.")
-        self._solver_status.clear()
-        self._update_semantic_controls()
-
-    def _set_validated_level(self, level: Level, path: Path | None) -> None:
-        """Adopt one validated level and invalidate any prior solver result."""
-        self._level = level
-        self._level_path = path
-        self._solver_result = None
-        self._save_solution_button.setEnabled(False)
-        self._solver_trace.clear()
-        self._semantic_status.setText(
-            f"Validated level {level.id!r}: {level.rows} rows × {level.cols} columns."
-        )
-        self._solver_status.setText("Level is ready for deterministic replay and solving.")
+        self._placement_status.setText("Level is ready for a placement.")
+        self._solver_status.setText("Level is ready to solve.")
         self._update_semantic_controls()
 
     def _validate_level_grid_dimensions(self, level: Level) -> None:
@@ -578,8 +634,9 @@ class CalibrationWindow(QMainWindow):
 
     def _open_placement_dialog(self) -> None:
         """Load a portable placement for topology inspection or deterministic replay."""
-        level = self._validate_level_editor()
+        level = self._level
         if level is None:
+            self._show_error("Formalize the reviewed cells before opening a placement.")
             return
         selected, _ = QFileDialog.getOpenFileName(
             self,
@@ -592,8 +649,9 @@ class CalibrationWindow(QMainWindow):
 
     def _load_placement_from_path(self, path: Path, level: Level | None = None) -> None:
         """Read a placement into the in-window editor and validate it against the level."""
-        active_level = level or self._validate_level_editor()
+        active_level = level or self._level
         if active_level is None:
+            self._show_error("Formalize the reviewed cells before opening a placement.")
             return
         try:
             raw_placement = path.read_text(encoding="utf-8")
@@ -607,8 +665,9 @@ class CalibrationWindow(QMainWindow):
 
     def _validate_placement_editor(self) -> RailPlacement | None:
         """Validate editable placement JSON against the current semantic level."""
-        level = self._validate_level_editor()
+        level = self._level
         if level is None:
+            self._show_error("Formalize the reviewed cells before validating a placement.")
             return None
         try:
             placement = RailPlacement.model_validate_json(self._placement_editor.toPlainText())
@@ -686,7 +745,7 @@ class CalibrationWindow(QMainWindow):
             result = simulate(
                 self._level,
                 placement,
-                SimulationOptions(max_ticks=self._max_ticks.value()),
+                SimulationOptions(max_ticks=_INTERACTIVE_MAX_TICKS),
             )
         except ValueError as error:
             self._show_error(f"Could not replay rail placement: {error}")
@@ -703,40 +762,137 @@ class CalibrationWindow(QMainWindow):
         self._placement_status.setText(
             f"Simulator {outcome} after {result.final_state.tick} tick(s)."
         )
+        if result.succeeded:
+            self._show_placement(placement)
 
     def _solve_level(self) -> None:
-        """Search the in-window semantic level and render its verified replay."""
-        level = self._validate_level_editor()
+        """Start a responsive background search for the in-memory level."""
+        level = self._level
         if level is None:
+            self._show_error("Formalize the reviewed cells before solving the level.")
             return
-        max_rails = self._max_rails.value() if self._limit_rails.isChecked() else None
-        self._solve_button.setEnabled(False)
+        if self._solver_thread is not None or self._solving_level is not None:
+            return
+        self._solver_result = None
+        self._pending_solver_result = None
+        self._solver_previews.clear()
+        self._solver_preview_timer.stop()
+        self._save_solution_button.setEnabled(False)
+        self._show_formal_level()
         self._solver_status.setText("Searching with automatic safe pruning…")
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        QApplication.processEvents()
-        try:
-            self._solver_result = solve(
-                level,
-                SolverLimits(
-                    max_placements=self._max_placements.value(),
-                    max_rails=max_rails,
-                    max_ticks=self._max_ticks.value(),
-                ),
-            )
-        except ValueError as error:
-            self._show_error(f"Could not solve semantic level: {error}")
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
-            self._solve_button.setEnabled(True)
+        self._solving_level = level
+        thread = QThread(self)
+        worker = _SolverWorker(level)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._solver_progressed)
+        worker.result_ready.connect(self._solver_completed)
+        worker.failed.connect(self._solver_failed)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._solver_thread_finished)
+        thread.finished.connect(thread.deleteLater)
+        self._solver_thread = thread
+        self._solver_worker = worker
+        self._set_solving(True)
+        thread.start()
 
-        self._save_solution_button.setEnabled(self._solver_result.solved)
-        if self._solver_result.placement is not None:
-            self._placement_editor.setPlainText(
-                self._solver_result.placement.model_dump_json(indent=2)
+    @Slot(object)
+    def _solver_progressed(self, progress: object) -> None:
+        """Queue one sampled candidate for paced playback on the GUI thread."""
+        if not isinstance(progress, SolverProgress) or self._level != self._solving_level:
+            return
+        self._solver_previews.append(progress)
+        if not self._solver_preview_timer.isActive():
+            self._solver_preview_timer.start()
+
+    @Slot()
+    def _advance_solver_preview(self) -> None:
+        """Render at most one candidate per event-loop turn."""
+        if self._solver_previews:
+            progress = self._solver_previews.popleft()
+            self._show_solver_progress(progress)
+            return
+
+        if self._pending_solver_result is not None:
+            result = self._pending_solver_result
+            self._pending_solver_result = None
+            self._adopt_solver_result(result)
+            return
+
+        if self._solver_thread is None:
+            self._finish_solver_activity()
+
+    def _adopt_solver_result(self, result: SolverResult) -> None:
+        """Retain and render a result after its sampled candidates were shown."""
+        self._solver_result = result
+        self._save_solution_button.setEnabled(result.solved)
+        if result.placement is not None:
+            self._placement_editor.setPlainText(result.placement.model_dump_json(indent=2))
+            self._set_validated_placement(result.placement, None)
+        self._render_solver_result(result)
+        self._finish_solver_activity()
+
+    def _finish_solver_activity(self) -> None:
+        """Finish playback and restore editing once the worker has also stopped."""
+        self._solver_preview_timer.stop()
+        self._solving_level = None
+        if self._solver_thread is not None:
+            return
+        self._set_solving(False)
+        self._update_extraction_controls()
+        self._update_semantic_controls()
+
+    def _show_solver_progress(self, progress: SolverProgress) -> None:
+        """Show the current sampled search candidate and its outcome."""
+        self._show_placement(progress.placement, open_cells=progress.open_cells)
+        if progress.outcome is CandidateOutcome.BRANCH_PRUNED:
+            self._solver_status.setText(
+                f"Branch {progress.branches_pruned}: pruned · "
+                f"{len(progress.placement.rails)} assigned, "
+                f"{len(progress.open_cells)} open cell(s)"
             )
-            self._set_validated_placement(self._solver_result.placement, None)
-        self._render_solver_result(self._solver_result)
+        else:
+            self._solver_status.setText(
+                f"Candidate {progress.placements_considered}: "
+                f"{progress.outcome.value} · {len(progress.placement.rails)} rail(s)"
+            )
+
+    @Slot(object)
+    def _solver_completed(self, result: object) -> None:
+        """Hold a completed result until the queued candidate playback ends."""
+        if not isinstance(result, SolverResult) or self._level != self._solving_level:
+            return
+        self._pending_solver_result = result
+        if not self._solver_preview_timer.isActive():
+            self._solver_preview_timer.start()
+
+    @Slot(str)
+    def _solver_failed(self, message: str) -> None:
+        """Report a worker failure without touching Qt from its thread."""
+        self._solver_previews.clear()
+        self._pending_solver_result = None
+        self._solver_preview_timer.stop()
+        self._solving_level = None
+        self._show_error(f"Could not solve semantic level: {message}")
+
+    @Slot()
+    def _solver_thread_finished(self) -> None:
+        """Release worker references and finish or continue preview playback."""
+        self._solver_thread = None
+        self._solver_worker = None
+        if self._solver_previews or self._pending_solver_result is not None:
+            if not self._solver_preview_timer.isActive():
+                self._solver_preview_timer.start()
+            return
+        self._finish_solver_activity()
+
+    def _set_solving(self, solving: bool) -> None:
+        """Prevent semantic input changes while keeping the window responsive."""
+        self._workflow_controls.setEnabled(not solving)
+        self._cell_editor.setEnabled(not solving)
+        self._canvas.setEnabled(not solving)
+        self._open_action.setEnabled(not solving)
 
     def _render_solver_result(self, result: SolverResult) -> None:
         """Render placement and trace from immutable simulator-verified output."""
@@ -755,6 +911,7 @@ class CalibrationWindow(QMainWindow):
             self._solver_status.setText(
                 f"Found a verified solution with {len(result.placement.rails)} rail(s)."
             )
+            self._show_placement(result.placement)
             lines.extend(("", "Placement:"))
             lines.extend(
                 f"  ({rail.cell.row}, {rail.cell.col}) "
@@ -769,7 +926,45 @@ class CalibrationWindow(QMainWindow):
         if result.trace:
             lines.extend(("", "Trace:"))
             lines.extend(_event_summary(event) for event in result.trace)
-        self._solver_trace.setPlainText("\n".join(lines))
+        self._log_activity("\n".join(lines))
+
+    def _show_placement(
+        self,
+        placement: RailPlacement,
+        *,
+        open_cells: tuple[CellCoord, ...] = (),
+    ) -> None:
+        """Show one attempted or successful placement in the level workspace."""
+        if self._level is None:
+            return
+        self._level_canvas.set_image(
+            _bgr_to_qimage(
+                render_placement_schematic(
+                    self._level,
+                    placement,
+                    open_cells=open_cells,
+                )
+            )
+        )
+        self._workspace_tabs.setTabEnabled(self._level_tab_index, True)
+        self._workspace_tabs.setCurrentIndex(self._level_tab_index)
+        self._level_canvas.fit_in_view()
+
+    def _show_formal_level(self) -> None:
+        """Open the schematic level before any placement is attempted."""
+        if self._level is None:
+            return
+        self._level_canvas.set_image(_bgr_to_qimage(render_level_schematic(self._level)))
+        self._workspace_tabs.setTabEnabled(self._level_tab_index, True)
+        self._workspace_tabs.setCurrentIndex(self._level_tab_index)
+        self._level_canvas.fit_in_view()
+
+    def _clear_level_view(self) -> None:
+        """Remove a stale formal level and its placement preview."""
+        self._level_canvas.clear_image()
+        self._workspace_tabs.setTabEnabled(self._level_tab_index, False)
+        if self._workspace_tabs.currentIndex() == self._level_tab_index:
+            self._workspace_tabs.setCurrentIndex(self._cells_tab_index)
 
     def _save_solution(self) -> None:
         """Save the current solution only after its replay reached success."""
@@ -811,19 +1006,22 @@ class CalibrationWindow(QMainWindow):
 
     def _update_semantic_controls(self) -> None:
         """Enable formalization and solver actions from in-memory workflow state."""
+        solving = self._solver_thread is not None or self._solving_level is not None
         annotations = self._cell_editor.annotations() if self._crops else ()
         complete = bool(annotations) and all(
             not annotation_errors(annotation, self._cell_types) for annotation in annotations
         )
-        self._formalize_button.setEnabled(complete and bool(self._level_number.text().strip()))
-        has_level_text = self._level is not None and bool(self._level_editor.toPlainText().strip())
+        self._formalize_button.setEnabled(
+            not solving and complete and bool(self._level_number.text().strip())
+        )
+        has_level = self._level is not None
         has_placement_text = bool(self._placement_editor.toPlainText().strip())
-        self._solve_button.setEnabled(has_level_text)
-        self._load_placement_button.setEnabled(has_level_text)
-        self._validate_placement_button.setEnabled(has_level_text and has_placement_text)
-        self._save_placement_button.setEnabled(has_level_text and has_placement_text)
-        self._inspect_topology_button.setEnabled(has_level_text and has_placement_text)
-        self._replay_placement_button.setEnabled(has_level_text and has_placement_text)
+        self._solve_button.setEnabled(not solving and has_level)
+        self._load_placement_button.setEnabled(has_level)
+        self._validate_placement_button.setEnabled(has_level and has_placement_text)
+        self._save_placement_button.setEnabled(has_level and has_placement_text)
+        self._inspect_topology_button.setEnabled(has_level and has_placement_text)
+        self._replay_placement_button.setEnabled(has_level and has_placement_text)
         self._update_instruction()
 
     def load_image(self, path: Path) -> None:
@@ -1096,8 +1294,12 @@ class CalibrationWindow(QMainWindow):
                 next_step = f"Review the {incomplete} highlighted cell(s) in the Cells workspace."
             elif self._level is None:
                 next_step = "Formalize the fully reviewed cell annotations."
+            elif self._solver_result is None:
+                next_step = "Solve the formalized level."
+            elif self._solver_result.solved:
+                next_step = "Review the verified placement in the Solution workspace."
             else:
-                next_step = "Review the formal Level view or continue to solving."
+                next_step = "Review the search result in the activity log."
         elif len(self._points) < len(_POINT_LABELS):
             if not self._points:
                 next_step = (
@@ -1185,7 +1387,9 @@ class CalibrationWindow(QMainWindow):
 
     def _update_extraction_controls(self) -> None:
         ready = (
-            self._image is not None
+            self._solver_thread is None
+            and self._solving_level is None
+            and self._image is not None
             and self._grid is not None
             and len(self._points) == len(_POINT_LABELS)
             and bool(self._level_number.text().strip())
@@ -1210,16 +1414,18 @@ class CalibrationWindow(QMainWindow):
         self._workspace_tabs.setTabEnabled(self._cells_tab_index, False)
         self._level_canvas.clear_image()
         self._workspace_tabs.setTabEnabled(self._level_tab_index, False)
-        if self._workspace_tabs.currentIndex() in (self._cells_tab_index, self._level_tab_index):
+        if self._workspace_tabs.currentIndex() in (
+            self._cells_tab_index,
+            self._level_tab_index,
+        ):
             self._workspace_tabs.setCurrentIndex(0)
         self._level = None
         self._level_path = None
         self._rail_budget = None
         self._solver_result = None
-        self._level_editor.clear()
-        self._semantic_status.setText("Formalize the reviewed cells before solving.")
+        self._placement_editor.clear()
         self._save_solution_button.setEnabled(False)
-        self._solver_trace.clear()
+        self._solver_status.setText("Formalize the reviewed cells before solving.")
         self._update_semantic_controls()
         self._update_instruction()
 
@@ -1235,6 +1441,7 @@ class CalibrationWindow(QMainWindow):
             self._show_error(f"Could not extract cells: {error}")
             return
 
+        self._invalidate_formal_level()
         self._crops = crops
         self._crop_spec = spec
         self._cell_editor.set_cells(
@@ -1331,6 +1538,7 @@ class CalibrationWindow(QMainWindow):
 
     def _cell_annotation_changed(self, annotation: CellAnnotation) -> None:
         """Persist complete manual evidence and refresh unresolved automatic matches."""
+        self._invalidate_formal_level()
         try:
             self._annotation_store.delete_sample(annotation.id)
             if annotation.source == "manual" and not annotation_value_errors(
@@ -1344,6 +1552,20 @@ class CalibrationWindow(QMainWindow):
             self._show_error(f"Could not update the confirmed cell sample: {error}")
             return
         self._update_annotation_summary()
+
+    def _invalidate_formal_level(self) -> None:
+        """Discard formal and solved state after any reviewed cell changes."""
+        self._level = None
+        self._level_path = None
+        self._placement = None
+        self._placement_path = None
+        self._solver_result = None
+        self._save_solution_button.setEnabled(False)
+        self._clear_level_view()
+        self._placement_editor.clear()
+        self._placement_inspection_output.clear()
+        self._placement_status.setText("Formalize the reviewed cells before using a placement.")
+        self._solver_status.setText("Formalize the reviewed cells before solving.")
 
     def _refresh_automatic_annotations(self) -> None:
         if not self._crops:
@@ -1463,12 +1685,8 @@ class CalibrationWindow(QMainWindow):
             return
         self._rail_budget = rail_budget
         self._level_path = None
-        self._level_editor.setPlainText(level.model_dump_json(indent=2))
         self._set_validated_level(level, None)
-        self._level_canvas.set_image(_bgr_to_qimage(render_level_schematic(level)))
-        self._workspace_tabs.setTabEnabled(self._level_tab_index, True)
-        self._workspace_tabs.setCurrentIndex(self._level_tab_index)
-        self._level_canvas.fit_in_view()
+        self._show_formal_level()
         self._log_activity(f"Formalized {level.id!r} from {len(annotations)} reviewed cells.")
         self._update_semantic_controls()
         self._update_instruction()

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from itertools import combinations
 from time import perf_counter
+from typing import Protocol
 
 from railbound.geometry import CellCoord
 from railbound.level import Level, Port
@@ -44,6 +45,15 @@ class SolverStatus(StrEnum):
     SOLVED = "solved"
     UNSOLVABLE = "unsolvable"
     LIMIT_REACHED = "limit_reached"
+
+
+class CandidateOutcome(StrEnum):
+    """How one visualized state left the deterministic search."""
+
+    BRANCH_PRUNED = "branch_pruned"
+    PRUNED = "pruned"
+    FAILED = "failed"
+    SUCCEEDED = "succeeded"
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +168,29 @@ class SolverResult:
 
 
 @dataclass(frozen=True, slots=True)
+class SolverProgress:
+    """One search state exposed for interactive visualization."""
+
+    placement: RailPlacement
+    outcome: CandidateOutcome
+    placements_considered: int
+    simulations: int
+    branches_pruned: int = 0
+    open_cells: tuple[CellCoord, ...] = ()
+
+    @property
+    def search_steps(self) -> int:
+        """Return a monotonic count suitable for sampling search progress."""
+        return self.placements_considered + self.branches_pruned
+
+
+class SolverProgressObserver(Protocol):
+    """Receive deterministic candidate updates without influencing search order."""
+
+    def __call__(self, progress: SolverProgress, /) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
 class SearchBenchmark:
     """Baseline and optimized results produced under identical limits."""
 
@@ -250,6 +283,7 @@ def solve(
     level: Level,
     limits: SolverLimits | None = None,
     options: SolverOptions | None = None,
+    progress_observer: SolverProgressObserver | None = None,
 ) -> SolverResult:
     """Find the first simulator-verified placement within ``limits``.
 
@@ -257,7 +291,9 @@ def solve(
     the fewest rails.  Pruning uses optimistic reachability and can therefore
     remove only impossible branches.  Dynamic runtime states are never merged
     across placements; the per-placement cache stops only exact deterministic
-    cycles.
+    cycles. ``progress_observer`` receives pruned partial branches and each
+    complete candidate after it is pruned or replayed; it cannot alter
+    deterministic search ordering.
     """
     active_limits = limits or SolverLimits()
     active_options = options or SolverOptions()
@@ -283,6 +319,7 @@ def solve(
             max_rails=active_limits.max_rails,
             options=active_options,
             counters=counters,
+            progress_observer=progress_observer,
         )
     else:
         candidates = iter_placement_candidates(level, max_rails=active_limits.max_rails)
@@ -308,14 +345,17 @@ def solve(
         )
         if active_options.forced_placements and forced_pruner.should_prune(level, placement):
             counters.forced_placements_pruned += 1
+            _notify_progress(progress_observer, placement, CandidateOutcome.PRUNED, counters)
             continue
         if active_options.connectivity_pruning and connectivity_pruner.should_prune(
             level, placement
         ):
             counters.connectivity_placements_pruned += 1
+            _notify_progress(progress_observer, placement, CandidateOutcome.PRUNED, counters)
             continue
         if any(predicate.should_prune(level, placement) for predicate in predicates):
             counters.custom_placements_pruned += 1
+            _notify_progress(progress_observer, placement, CandidateOutcome.PRUNED, counters)
             continue
 
         replay = _replay_candidate(
@@ -329,6 +369,7 @@ def solve(
         counters.events_emitted += replay.events_emitted
         counters.transposition_hits += replay.transposition_hits
         if replay.simulation is not None and replay.simulation.succeeded:
+            _notify_progress(progress_observer, placement, CandidateOutcome.SUCCEEDED, counters)
             return SolverResult(
                 status=SolverStatus.SOLVED,
                 placement=placement,
@@ -336,6 +377,7 @@ def solve(
                 trace=replay.simulation.events,
                 statistics=_statistics(counters, started_at),
             )
+        _notify_progress(progress_observer, placement, CandidateOutcome.FAILED, counters)
 
     status = SolverStatus.UNSOLVABLE
     if active_limits.max_rails is not None and active_limits.max_rails < natural_capacity:
@@ -392,14 +434,37 @@ def _statistics(counters: _SearchCounters, started_at: float) -> SearchStats:
     )
 
 
+def _notify_progress(
+    observer: SolverProgressObserver | None,
+    placement: RailPlacement,
+    outcome: CandidateOutcome,
+    counters: _SearchCounters,
+    *,
+    open_cells: tuple[CellCoord, ...] = (),
+) -> None:
+    if observer is None:
+        return
+    observer(
+        SolverProgress(
+            placement=placement,
+            outcome=outcome,
+            placements_considered=counters.placements_considered,
+            simulations=counters.simulations,
+            branches_pruned=counters.connectivity_branches_pruned,
+            open_cells=open_cells,
+        )
+    )
+
+
 def _iter_optimized_candidates(
     level: Level,
     *,
     max_rails: int | None,
     options: SolverOptions,
     counters: _SearchCounters,
+    progress_observer: SolverProgressObserver | None,
 ) -> Iterator[RailPlacement]:
-    """Yield complete candidates after safe partial-graph pruning."""
+    """Yield candidates while reporting safely pruned partial branches."""
     cells = tuple(sorted(level.buildable_cells, key=_cell_key))
     if options.heuristic_ordering:
         cells = tuple(sorted(cells, key=lambda cell: _heuristic_cell_key(level, cell)))
@@ -423,6 +488,13 @@ def _iter_optimized_candidates(
             selected = (*forced_cells, *optional_selection)
             if options.connectivity_pruning and not selected_cells_are_reachable(level, selected):
                 counters.connectivity_branches_pruned += 1
+                _notify_progress(
+                    progress_observer,
+                    RailPlacement(level_id=level.id),
+                    CandidateOutcome.BRANCH_PRUNED,
+                    counters,
+                    open_cells=selected,
+                )
                 continue
             ordered_selection = tuple(
                 sorted(selected, key=lambda cell: _assignment_cell_key(level, cell))
@@ -434,6 +506,7 @@ def _iter_optimized_candidates(
                 connectivity_pruning=options.connectivity_pruning,
                 heuristic_ordering=options.heuristic_ordering,
                 counters=counters,
+                progress_observer=progress_observer,
             )
 
 
@@ -445,6 +518,7 @@ def _assign_piece_kinds(
     connectivity_pruning: bool,
     heuristic_ordering: bool,
     counters: _SearchCounters,
+    progress_observer: SolverProgressObserver | None,
 ) -> Iterator[RailPlacement]:
     """Assign rail topology to a fixed cell set with optimistic look-ahead."""
     rails: list[PlacedRail] = []
@@ -459,6 +533,13 @@ def _assign_piece_kinds(
             open_cells=open_cells,
         ):
             counters.connectivity_branches_pruned += 1
+            _notify_progress(
+                progress_observer,
+                partial,
+                CandidateOutcome.BRANCH_PRUNED,
+                counters,
+                open_cells=open_cells,
+            )
             return
         if cell_index == len(selected_cells):
             yield RailPlacement(
@@ -715,6 +796,7 @@ def _cell_key(cell: CellCoord) -> tuple[int, int]:
 
 
 __all__ = [
+    "CandidateOutcome",
     "ConnectivityPruner",
     "ForcedPlacementPruner",
     "PruningPredicate",
@@ -722,6 +804,8 @@ __all__ = [
     "SearchStats",
     "SolverLimits",
     "SolverOptions",
+    "SolverProgress",
+    "SolverProgressObserver",
     "SolverResult",
     "SolverStatistics",
     "SolverStatus",

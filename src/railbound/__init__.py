@@ -117,6 +117,7 @@ from railbound.simulation import (
     step,
 )
 from railbound.solver import (
+    CandidateOutcome,
     ConnectivityPruner,
     ForcedPlacementPruner,
     PruningPredicate,
@@ -124,6 +125,8 @@ from railbound.solver import (
     SearchStats,
     SolverLimits,
     SolverOptions,
+    SolverProgress,
+    SolverProgressObserver,
     SolverResult,
     SolverStatistics,
     SolverStatus,
@@ -148,6 +151,7 @@ from railbound.topology import (
 
 __all__ = [
     "ActorFeature",
+    "CandidateOutcome",
     "CellAnnotation",
     "CellCoord",
     "CellCrop",
@@ -200,6 +204,8 @@ __all__ = [
     "SearchStats",
     "SolverLimits",
     "SolverOptions",
+    "SolverProgress",
+    "SolverProgressObserver",
     "SolverResult",
     "SolverStatistics",
     "SolverStatus",
