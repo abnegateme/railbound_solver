@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from math import floor, hypot
 from pathlib import Path
-from typing import Literal, cast
+from typing import cast
 
 import cv2
 from pydantic import TypeAdapter, ValidationError
@@ -26,10 +26,10 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGraphicsPixmapItem,
     QGraphicsScene,
     QGraphicsView,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -55,7 +55,6 @@ from railbound.calibration import (
     grid_from_three_intersections,
     image_sha256,
 )
-from railbound.crop_io import write_crop_set
 from railbound.detection import (
     CalibrationCandidate,
     GridDetectionHints,
@@ -105,6 +104,84 @@ _DEFAULT_ROWS = 8
 _DEFAULT_COLS = 10
 _DIMENSION_CONTROL_WIDTH = 72
 _INTERSECTION_SELECTION_MAX_AXIS_FRACTION = 0.4
+_INTERACTIVE_CROP_SPEC = CropSpec(
+    output_size=96,
+    core_fraction=0.8,
+    mode="core",
+    mask_mode="none",
+)
+_CALIBRATION_CARD_STYLE = """
+QFrame#calibrationCard, QFrame#cellsCard {
+    background-color: #ffffff;
+    border: 1px solid #dfe3eb;
+    border-radius: 12px;
+}
+QLabel#calibrationTitle {
+    color: #1b1b1f;
+    font-size: 15px;
+    font-weight: 600;
+}
+QLabel#dimensionLabel {
+    color: #3f4249;
+    font-size: 11px;
+}
+QSpinBox#dimensionInput {
+    min-height: 22px;
+    padding: 3px 8px;
+    color: #1b1b1f;
+    background-color: #f8f7fc;
+    border: 1px solid #c9c6d0;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    selection-background-color: #6750a4;
+}
+QSpinBox#dimensionInput:hover {
+    background-color: #f4f1fa;
+    border-color: #79747e;
+}
+QSpinBox#dimensionInput:focus {
+    background-color: #ffffff;
+    border: 2px solid #6750a4;
+}
+QToolButton#calibrationAction {
+    border: none;
+    border-radius: 16px;
+    background-color: transparent;
+}
+QToolButton#calibrationAction:hover {
+    background-color: #f0ebf7;
+}
+QToolButton#calibrationAction:pressed {
+    background-color: #e4d9f2;
+}
+QToolButton#calibrationAction:disabled {
+    background-color: transparent;
+}
+QPushButton#primaryAction {
+    min-height: 36px;
+    padding: 0 18px;
+    color: #ffffff;
+    background-color: #6750a4;
+    border: none;
+    border-radius: 18px;
+    font-weight: 600;
+}
+QPushButton#primaryAction:hover {
+    background-color: #5b4497;
+}
+QPushButton#primaryAction:pressed {
+    background-color: #4f378b;
+}
+QPushButton#primaryAction:disabled {
+    color: #9c97a4;
+    background-color: #e2dfe7;
+}
+QLabel#cellsSummary {
+    color: #6f7480;
+    font-size: 11px;
+}
+"""
 _POINT_LABELS = (
     "Click the upper-left grid intersection.",
     "Click the adjacent grid intersection to its right.",
@@ -133,6 +210,11 @@ class CalibrationCanvas(QGraphicsView):
         self._image_item.setPixmap(QPixmap.fromImage(image))
         self._scene.setSceneRect(self._image_item.boundingRect())
 
+    def clear_image(self) -> None:
+        """Remove the current image and reset the scene bounds."""
+        self._image_item.setPixmap(QPixmap())
+        self._scene.setSceneRect(self._image_item.boundingRect())
+
     def fit_in_view(self) -> None:
         if not self._image_item.pixmap().isNull():
             self.fitInView(self._image_item, Qt.AspectRatioMode.KeepAspectRatio)
@@ -159,28 +241,6 @@ class CalibrationCanvas(QGraphicsView):
         event.accept()
 
 
-class CropPreviewWindow(QMainWindow):
-    """Zoomable contact-sheet view for in-memory normalized cell crops."""
-
-    def __init__(self, parent: QWidget) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Railbound Solver — Extracted cells")
-        self.resize(1000, 800)
-        self._canvas = CalibrationCanvas()
-        self.setCentralWidget(self._canvas)
-
-        toolbar = QToolBar("Cell previews", self)
-        fit_action = QAction("Fit cells", self)
-        fit_action.triggered.connect(self._canvas.fit_in_view)
-        toolbar.addAction(fit_action)
-        self.addToolBar(toolbar)
-
-    def set_contact_sheet(self, contact_sheet: ColorImage) -> None:
-        """Replace the displayed contact sheet without persisting it to disk."""
-        self._canvas.set_image(_bgr_to_qimage(contact_sheet))
-        self._canvas.fit_in_view()
-
-
 class CalibrationWindow(QMainWindow):
     """One interactive workflow from screenshot parsing through baseline solving."""
 
@@ -199,8 +259,6 @@ class CalibrationWindow(QMainWindow):
         self._grid: GridGeometry | None = None
         self._crops: list[CellCrop] = []
         self._crop_spec: CropSpec | None = None
-        self._contact_sheet: ColorImage | None = None
-        self._crop_preview: CropPreviewWindow | None = None
         self._automatic_detection = automatic_detection
         self._detection_candidates: list[CalibrationCandidate] = []
         self._recognition_report: RecognitionReport | None = None
@@ -253,66 +311,78 @@ class CalibrationWindow(QMainWindow):
 
         calibration_controls = QWidget()
         calibration_controls.setMinimumWidth(300)
+        calibration_controls.setStyleSheet(_CALIBRATION_CARD_STYLE)
         layout = QVBoxLayout(calibration_controls)
 
-        calibration_group = QGroupBox("Calibration")
-        calibration_layout = QVBoxLayout(calibration_group)
+        calibration_card = QFrame()
+        calibration_card.setObjectName("calibrationCard")
+        calibration_card.setAccessibleName("Calibration")
+        calibration_layout = QVBoxLayout(calibration_card)
+        calibration_layout.setContentsMargins(12, 10, 12, 12)
+        calibration_layout.setSpacing(8)
+
+        title = QLabel("Calibration")
+        title.setObjectName("calibrationTitle")
+
+        header = QHBoxLayout()
+        header.setSpacing(4)
+        header.addWidget(title, stretch=1)
+        self._undo_calibration_button = QToolButton()
+        self._undo_calibration_button.setObjectName("calibrationAction")
+        self._undo_calibration_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowBack)
+        )
+        self._undo_calibration_button.setFixedSize(32, 32)
+        self._undo_calibration_button.setToolTip("Undo last grid intersection")
+        self._undo_calibration_button.setAccessibleName("Undo last grid intersection")
+        self._undo_calibration_button.clicked.connect(self._undo_last_point)
+        self._reset_calibration_button = QToolButton()
+        self._reset_calibration_button.setObjectName("calibrationAction")
+        self._reset_calibration_button.setIcon(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload)
+        )
+        self._reset_calibration_button.setFixedSize(32, 32)
+        self._reset_calibration_button.setToolTip("Start calibration over")
+        self._reset_calibration_button.setAccessibleName("Start calibration over")
+        self._reset_calibration_button.clicked.connect(self._reset_points)
+        header.addWidget(self._undo_calibration_button)
+        header.addWidget(self._reset_calibration_button)
+        calibration_layout.addLayout(header)
+
         dimensions = QHBoxLayout()
-        dimensions.addWidget(QLabel("Rows"))
-        dimensions.addWidget(self._rows)
-        dimensions.addSpacing(12)
-        dimensions.addWidget(QLabel("Columns"))
-        dimensions.addWidget(self._cols)
+        dimensions.setSpacing(8)
+        for label_text, control in (("Rows", self._rows), ("Columns", self._cols)):
+            label = QLabel(label_text)
+            label.setObjectName("dimensionLabel")
+            control.setObjectName("dimensionInput")
+            dimensions.addWidget(label)
+            dimensions.addWidget(control)
         dimensions.addStretch()
         calibration_layout.addLayout(dimensions)
+        layout.addWidget(calibration_card)
 
-        calibration_actions = QHBoxLayout()
-        undo_button = QToolButton()
-        undo_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowBack))
-        undo_button.setToolTip("Undo last grid intersection")
-        undo_button.setAccessibleName("Undo last grid intersection")
-        undo_button.setAutoRaise(True)
-        undo_button.clicked.connect(self._undo_last_point)
-        reset_button = QToolButton()
-        reset_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
-        reset_button.setToolTip("Start calibration over")
-        reset_button.setAccessibleName("Start calibration over")
-        reset_button.setAutoRaise(True)
-        reset_button.clicked.connect(self._reset_points)
-        calibration_actions.addWidget(undo_button)
-        calibration_actions.addWidget(reset_button)
-        calibration_actions.addStretch()
-        calibration_layout.addLayout(calibration_actions)
-        layout.addWidget(calibration_group)
-
-        layout.addWidget(QLabel("Cell extraction"))
-        self._crop_mode = QComboBox()
-        self._crop_mode.addItem("Core (inside cell)")
-        self._crop_mode.addItem("Context (includes neighbours)")
-        self._crop_size = QSpinBox()
-        self._crop_size.setRange(16, 512)
-        self._crop_size.setValue(96)
-        self._cell_mask = QCheckBox("Mask outside target cell")
-        crop_form = QFormLayout()
-        crop_form.addRow("Mode", self._crop_mode)
-        crop_form.addRow("Output size", self._crop_size)
-        crop_form.addRow("", self._cell_mask)
-        layout.addLayout(crop_form)
-        self._extract_button = QPushButton("Extract cells in memory")
+        cells_card = QFrame()
+        cells_card.setObjectName("cellsCard")
+        cells_card.setAccessibleName("Cells")
+        cells_layout = QVBoxLayout(cells_card)
+        cells_layout.setContentsMargins(12, 10, 12, 12)
+        cells_layout.setSpacing(8)
+        cells_title = QLabel("Cells")
+        cells_title.setObjectName("calibrationTitle")
+        self._extract_button = QPushButton("Extract cells")
+        self._extract_button.setObjectName("primaryAction")
         self._extract_button.clicked.connect(self._extract_cells)
-        self._show_crops_button = QPushButton("Show extracted cells")
-        self._show_crops_button.clicked.connect(self._show_crop_preview)
-        self._export_crops_button = QPushButton("Export crops and manifest…")
-        self._export_crops_button.clicked.connect(self._export_crops)
+        cells_header = QHBoxLayout()
+        cells_header.addWidget(cells_title)
+        cells_header.addStretch()
+        cells_header.addWidget(self._extract_button)
+        cells_layout.addLayout(cells_header)
         self._crop_summary = QLabel()
+        self._crop_summary.setObjectName("cellsSummary")
         self._crop_summary.setWordWrap(True)
-        layout.addWidget(self._extract_button)
-        layout.addWidget(self._show_crops_button)
-        layout.addWidget(self._export_crops_button)
-        layout.addWidget(self._crop_summary)
-        self._crop_mode.currentIndexChanged.connect(self._crop_settings_changed)
-        self._crop_size.valueChanged.connect(self._crop_settings_changed)
-        self._cell_mask.toggled.connect(self._crop_settings_changed)
+        self._crop_summary.hide()
+        cells_layout.addWidget(self._crop_summary)
+        layout.addWidget(cells_card)
 
         layout.addStretch()
 
@@ -325,9 +395,14 @@ class CalibrationWindow(QMainWindow):
 
         content = QWidget()
         content_layout = QHBoxLayout(content)
-        content_layout.addWidget(self._canvas, stretch=1)
+        self._crop_canvas = CalibrationCanvas()
+        self._workspace_tabs = QTabWidget()
+        self._workspace_tabs.addTab(self._canvas, "Screenshot")
+        self._cells_tab_index = self._workspace_tabs.addTab(self._crop_canvas, "Cells")
+        self._workspace_tabs.setTabEnabled(self._cells_tab_index, False)
+        content_layout.addWidget(self._workspace_tabs, stretch=1)
         tabs = QTabWidget()
-        tabs.addTab(calibration_controls, "Grid and crops")
+        tabs.addTab(calibration_controls, "Grid and cells")
         tabs.addTab(self._build_review_and_solver_tab(), "Review and solve")
 
         sidebar = QWidget()
@@ -1789,6 +1864,11 @@ class CalibrationWindow(QMainWindow):
         self._update_instruction()
 
     def _update_instruction(self) -> None:
+        has_selection = bool(self._points or self._reference_points)
+        self._undo_calibration_button.setEnabled(has_selection)
+        self._reset_calibration_button.setEnabled(
+            bool(has_selection or self._grid or self._crops or self._detection_candidates)
+        )
         if self._image is None:
             next_step = "Open a screenshot to begin."
         elif self._crops:
@@ -1885,31 +1965,26 @@ class CalibrationWindow(QMainWindow):
         """Return the current in-memory cells for future recognition stages."""
         return tuple(self._crops)
 
-    def _crop_settings_changed(self) -> None:
-        self._clear_extraction()
-        self._update_extraction_controls()
-
     def _update_extraction_controls(self) -> None:
         ready = (
             self._image is not None
             and self._grid is not None
             and len(self._points) == len(_POINT_LABELS)
         )
-        self._crop_mode.setEnabled(ready)
-        self._crop_size.setEnabled(ready)
-        self._cell_mask.setEnabled(ready and self._crop_mode.currentIndex() == 1)
         self._extract_button.setEnabled(ready)
-        self._show_crops_button.setEnabled(bool(self._crops))
-        self._export_crops_button.setEnabled(bool(self._crops))
 
     def _clear_extraction(self) -> None:
-        had_extraction = self._contact_sheet is not None
+        had_extraction = bool(self._crops)
         self._crop_summary.setText(
             "Cell previews are out of date; extract them again." if had_extraction else ""
         )
+        self._crop_summary.setVisible(had_extraction)
         self._crops = []
         self._crop_spec = None
-        self._contact_sheet = None
+        self._crop_canvas.clear_image()
+        self._workspace_tabs.setTabEnabled(self._cells_tab_index, False)
+        if self._workspace_tabs.currentIndex() == self._cells_tab_index:
+            self._workspace_tabs.setCurrentIndex(0)
         self._recognition_report = None
         self._level_draft = None
         self._solver_result = None
@@ -1920,8 +1995,6 @@ class CalibrationWindow(QMainWindow):
         self._solver_trace.clear()
         self._refresh_template_crop_choices()
         self._refresh_semantic_mapping_form()
-        if self._crop_preview is not None:
-            self._crop_preview.hide()
         self._update_semantic_controls()
         self._update_instruction()
 
@@ -1929,17 +2002,7 @@ class CalibrationWindow(QMainWindow):
         if self._image is None or self._grid is None:
             self._show_error("Finish a valid grid before extracting cells.")
             return
-        mode: Literal["core", "context"] = (
-            "core" if self._crop_mode.currentIndex() == 0 else "context"
-        )
-        mask_mode: Literal["none", "cell"] = (
-            "cell" if mode == "context" and self._cell_mask.isChecked() else "none"
-        )
-        spec = CropSpec(
-            output_size=self._crop_size.value(),
-            mode=mode,
-            mask_mode=mask_mode,
-        )
+        spec = _INTERACTIVE_CROP_SPEC
         try:
             crops = CellExtractor().extract(self._image, self._grid, spec)
             contact_sheet = render_crop_contact_sheet(crops, columns=self._grid.cols)
@@ -1949,63 +2012,19 @@ class CalibrationWindow(QMainWindow):
 
         self._crops = crops
         self._crop_spec = spec
-        self._contact_sheet = contact_sheet
+        self._crop_canvas.set_image(_bgr_to_qimage(contact_sheet))
+        self._workspace_tabs.setTabEnabled(self._cells_tab_index, True)
+        self._workspace_tabs.setCurrentIndex(self._cells_tab_index)
+        self._crop_canvas.fit_in_view()
         self._refresh_template_crop_choices()
         self._crop_summary.setText(
-            f"Extracted {len(crops)} cells in memory ({spec.mode}, {spec.output_size} × "
-            f"{spec.output_size} px). No files were written."
+            f"{len(crops)} cells ready in memory · {spec.output_size} × {spec.output_size} px"
         )
+        self._crop_summary.show()
         self._log_activity("Grid calibrated and cells extracted in memory.")
         self._update_extraction_controls()
         self._update_semantic_controls()
         self._update_instruction()
-        self._show_crop_preview()
-
-    def _export_crops(self) -> None:
-        """Write the optional M2 crop artifacts for sharing or batch recognition."""
-        if self._grid is None or self._crop_spec is None or not self._crops:
-            self._show_error("Extract cells before exporting crop artifacts.")
-            return
-        selected = QFileDialog.getExistingDirectory(
-            self,
-            "Choose directory for crops, manifest, and contact sheet",
-            str(self._image_path.parent if self._image_path is not None else Path.cwd()),
-        )
-        if selected:
-            self._export_crops_to_directory(Path(selected))
-
-    def _export_crops_to_directory(self, output_directory: Path) -> None:
-        """Persist the current crop set using the same M2 portable artifact format as the CLI."""
-        if self._grid is None or self._crop_spec is None or self._contact_sheet is None:
-            self._show_error("Extract cells before exporting crop artifacts.")
-            return
-        try:
-            manifest = write_crop_set(
-                self._crops,
-                grid=self._grid,
-                spec=self._crop_spec,
-                output_directory=output_directory,
-            )
-            contact_sheet_path = output_directory / "contact_sheet.png"
-            if not cv2.imwrite(str(contact_sheet_path), self._contact_sheet):
-                raise OSError(f"could not write contact sheet: {contact_sheet_path}")
-        except (OSError, ValueError) as error:
-            self._show_error(f"Could not export crop artifacts: {error}")
-            return
-        self._crop_summary.setText(
-            f"Exported {len(manifest.crops)} crops, manifest, and contact sheet to {output_directory}."
-        )
-
-    def _show_crop_preview(self) -> None:
-        if self._contact_sheet is None:
-            self._show_error("Extract cells before opening their preview.")
-            return
-        if self._crop_preview is None:
-            self._crop_preview = CropPreviewWindow(self)
-        self._crop_preview.set_contact_sheet(self._contact_sheet)
-        self._crop_preview.show()
-        self._crop_preview.raise_()
-        self._crop_preview.activateWindow()
 
     def _show_error(self, message: str) -> None:
         self._log_activity(f"Error: {message}")

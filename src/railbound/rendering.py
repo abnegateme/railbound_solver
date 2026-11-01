@@ -14,7 +14,6 @@ ColorImage = NDArray[np.uint8]
 
 _WHITE = (255, 255, 255)
 _ORANGE = (0, 165, 255)
-_GREEN = (0, 220, 0)
 _RED = (0, 0, 255)
 _MAGENTA = (255, 0, 255)
 
@@ -28,17 +27,33 @@ def render_grid_overlay(image: NDArray[np.uint8], grid: GridGeometry) -> ColorIm
     _validate_image_dimensions(image, grid)
     overlay = _as_bgr(image)
 
+    for row in range(grid.rows + 1):
+        grid_row = row - 0.5
+        cv2.line(
+            overlay,
+            _cv_point(grid.grid_to_pixel(grid_row, -0.5)),
+            _cv_point(grid.grid_to_pixel(grid_row, grid.cols - 0.5)),
+            _ORANGE,
+            1,
+            cv2.LINE_AA,
+        )
+    for col in range(grid.cols + 1):
+        grid_col = col - 0.5
+        cv2.line(
+            overlay,
+            _cv_point(grid.grid_to_pixel(-0.5, grid_col)),
+            _cv_point(grid.grid_to_pixel(grid.rows - 0.5, grid_col)),
+            _ORANGE,
+            1,
+            cv2.LINE_AA,
+        )
+
     boundary = np.array([_cv_point(point) for point in grid.outer_boundary()], dtype=np.int32)
     cv2.polylines(
         overlay, [boundary], isClosed=True, color=_ORANGE, thickness=2, lineType=cv2.LINE_AA
     )
 
     origin = _cv_point(grid.origin_px)
-    col_end = _cv_point(grid.grid_to_pixel(0, max(grid.cols - 1, 1)))
-    row_end = _cv_point(grid.grid_to_pixel(max(grid.rows - 1, 1), 0))
-    cv2.arrowedLine(overlay, origin, col_end, _GREEN, 2, cv2.LINE_AA, tipLength=0.08)
-    cv2.arrowedLine(overlay, origin, row_end, _RED, 2, cv2.LINE_AA, tipLength=0.08)
-
     for cell, center in grid.cell_centers():
         position = _cv_point(center)
         cv2.circle(overlay, position, 3, _WHITE, thickness=-1, lineType=cv2.LINE_AA)

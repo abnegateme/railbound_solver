@@ -26,6 +26,7 @@ def test_overlay_retains_source_dimensions_and_marks_all_centers() -> None:
     for _, center in grid.cell_centers():
         x, y = round(center.x), round(center.y)
         assert np.any(overlay[y, x] != 0)
+    assert np.any(overlay[60, 60] != 0)
 
 
 def test_overlay_rejects_a_different_source_size() -> None:

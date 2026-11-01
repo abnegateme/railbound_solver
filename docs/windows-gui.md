@@ -60,10 +60,11 @@ Use the same window's **Review and solve** tab for every completed stage:
   resulting placement. Pruning and runtime caching are automatic and add no
   extra controls.
 
-The **Grid and crops** tab can also export optional PNG crops, a manifest, and
-a contact sheet for batch workflows. No intermediate artifacts are required
-for the primary interactive path. A template catalog has a top-level
-`templates` list; do not select a crop manifest or level file as its catalog.
+The **Grid and cells** tab uses one fixed extraction profile. After extraction,
+the workspace switches from **Screenshot** to **Cells** so the normalized input
+to recognition can be inspected directly; no intermediate artifacts are
+written. A template catalog has a top-level `templates` list; do not select a
+crop manifest or level file as its catalog.
 
 The host environment is only a local GUI runtime, not an installer. Its
 desktop access must remain outside the devcontainer.
