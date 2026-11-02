@@ -47,27 +47,40 @@ list both limits the named kinds and excludes unnamed kinds from the placement.
 
 ## Static rail definitions
 
-The supported `piece_kind` values are `straight`, `curve`, and `crossing`.
-`orientation` is one of `N`, `E`, `S`, or `W`; it rotates the canonical
-north-facing definition clockwise.
+The supported `piece_kind` values are `straight`, `curve`, `switch`, and
+`crossing`. `orientation` is one of `N`, `E`, `S`, or `W`; it rotates the
+canonical north-facing definition clockwise. For a switch, `orientation`
+instead names its perpendicular trunk and the required `switch_output` selects
+one of the two mutually opposite output ports.
 
 | Kind | Canonical internal transitions |
 | --- | --- |
 | `straight` | `N` ↔ `S` |
 | `curve` | `N` ↔ `E` |
+| `switch` | asymmetric three-port routing described below |
 | `crossing` | `N` ↔ `S` and independently `E` ↔ `W` |
 
 For example, an east-oriented straight has the `E` ↔ `W` transition. Rotation
 is retained exactly as authored even when it produces an equivalent topology,
 such as `N` and `S` straights; solver canonicalisation is a later concern.
-`rail_piece_transitions(kind, orientation)` exposes the definitions directly.
+`rail_piece_transitions(kind, orientation, switch_output)` exposes the
+definitions directly; `switch_output` is omitted for other piece kinds.
+
+A placeable switch has eight canonical variants: four trunk directions times
+two opposite outputs. A train entering the trunk exits through
+`switch_output`; a train entering either output merges onto the trunk. For
+example, a north-trunk switch has `N`, `E`, and `W` ports and selects either
+`E` or `W`. It is therefore runtime routing, not an undirected static
+transition. The compiled piece exposes its three ports while the corresponding
+immutable `Switch` definition supplies movement semantics.
 
 ## Compiled graph
 
 Every used cell edge is a `PortNode(cell, port)`. The compiler adds two
 separate kinds of undirected `PortConnection`:
 
-- `internal` joins the two ports paired by one rail inside its cell.
+- `internal` joins the two ports paired by one static non-switch rail inside
+  its cell.
 - `adjacent` joins facing ports of rails in neighbouring cells only when both
   ports exist.
 
@@ -78,7 +91,8 @@ port that faces beyond the level dimensions is also listed in `boundary_exits`.
 inspection. A crossing contains two independent internal components unless
 other rails join them outside that cell.
 
-`CompiledBoard.transition(port)` traverses a rail within one cell and
+`CompiledBoard.transition(port)` traverses a static rail within one cell and
 `CompiledBoard.adjacent(port)` traverses one validated cell boundary. Both
 return `None` when the requested edge does not exist. This separation gives a
-later simulator unambiguous movement stages.
+later simulator unambiguous movement stages. Switch traversal is intentionally
+resolved by the simulator from the board's switch definitions.

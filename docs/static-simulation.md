@@ -42,15 +42,18 @@ Every `step()` uses one immutable input state:
 
 1. Derive a move intent for each active actor, sorted by actor ID, using gate
    and switch values from the beginning of the tick.
-2. A switch routes an actor from its `entry_port` to its selected output;
-   either output may merge back into the entry port. A tunnel transfers an
-   actor from its entered endpoint to the paired endpoint's `exit_port` in the
-   same tick.
+2. A switch routes an actor from its trunk `entry_port` to its selected output;
+   entry from either of the two opposite outputs merges back onto the
+   perpendicular trunk. A base placeable switch has no channel. A tunnel
+   transfers an actor from its entered endpoint to the paired endpoint's
+   `exit_port` in the same tick.
 3. If an intent cannot enter a track, is blocked by a closed gate, reaches an
    unconnected port, or exits the board, finish atomically with the first
    actor-ID-ordered failure.
 4. Detect simultaneous same-cell, head-on edge-swap, and shared-tunnel
-   collisions. A collision is terminal and no button effects occur.
+   collisions. Sharing a target cell is a collision even when its static
+   topology contains separate internal transitions. A collision is terminal
+   and no button effects occur.
 5. Apply every accepted move together. Each actor entering a button emits a
    press event; press events are sorted by actor ID, then button ID.
 6. Each press toggles every same-channel gate and switch in global device-ID
@@ -61,6 +64,8 @@ Every `step()` uses one immutable input state:
 
 A button cannot open a gate for the same tick. Buttons toggle; an unchannelled
 switch stays at `initial_output`. Arrived actors no longer move or collide.
+Rails hold no persistent occupancy state: actors may reuse the same transition
+on later ticks, while simultaneous entry into one cell remains a collision.
 
 ## Events and failures
 
@@ -72,7 +77,8 @@ at one. Failures are:
 - `dead_end`: its selected exit has no matching in-bounds neighbour port.
 - `boundary_exit`: its selected exit leaves the board.
 - `gate_closed`: its selected destination is blocked by a closed gate.
-- `collision`: simultaneous intents share a target cell or swap an edge.
+- `collision`: simultaneous intents share a target cell, swap an edge, or
+  share a tunnel.
 - `arrival_order`: a newly completed arrival contradicts `arrival_order`.
 - `step_limit`: the configured replay bound was exhausted.
 

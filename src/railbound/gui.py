@@ -916,6 +916,7 @@ class CalibrationWindow(QMainWindow):
             lines.extend(
                 f"  ({rail.cell.row}, {rail.cell.col}) "
                 f"{rail.piece_kind.value} {rail.orientation.value}"
+                + ("" if rail.switch_output is None else f" output {rail.switch_output.value}")
                 for rail in result.placement.rails
             )
         elif result.status is SolverStatus.LIMIT_REACHED:
@@ -1814,9 +1815,11 @@ def _topology_summary(board: CompiledBoard) -> str:
             else:
                 source = piece.piece_kind.value if piece.piece_kind is not None else "placement"
             orientation = "" if piece.orientation is None else f" {piece.orientation.value}"
+            output = "" if piece.switch_output is None else f" output {piece.switch_output.value}"
             ports = ",".join(port.value for port in piece.ports)
             lines.append(
-                f"  ({piece.cell.row}, {piece.cell.col}) {piece.source}: {source}{orientation} [{ports}]"
+                f"  ({piece.cell.row}, {piece.cell.col}) {piece.source}: "
+                f"{source}{orientation}{output} [{ports}]"
             )
     if board.unconnected_ports:
         lines.extend(("", "Unconnected ports:"))

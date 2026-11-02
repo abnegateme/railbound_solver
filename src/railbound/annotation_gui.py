@@ -208,12 +208,29 @@ class CellAnnotationCard(QFrame):
             return editor
         if definition.value_kind == "integer":
             editor = QSpinBox()
-            editor.setRange(-1_000_000, 1_000_000)
-            if isinstance(current, int):
-                editor.setValue(current)
-            editor.valueChanged.connect(
-                lambda value, key=definition.id: self._property_changed(key, value)
-            )
+            minimum = definition.minimum if definition.minimum is not None else -1_000_000
+            maximum = definition.maximum if definition.maximum is not None else 1_000_000
+            if definition.required:
+                editor.setRange(minimum, maximum)
+                if isinstance(current, int) and not isinstance(current, bool):
+                    editor.setValue(current)
+                editor.valueChanged.connect(
+                    lambda value, key=definition.id: self._property_changed(key, value)
+                )
+            else:
+                empty_value = minimum - 1
+                editor.setRange(empty_value, maximum)
+                editor.setSpecialValueText("—")
+                editor.setValue(
+                    current
+                    if isinstance(current, int) and not isinstance(current, bool)
+                    else empty_value
+                )
+                editor.valueChanged.connect(
+                    lambda value, key=definition.id, empty=empty_value: self._property_changed(
+                        key, None if value == empty else value
+                    )
+                )
             return editor
         if definition.choices:
             editor = QComboBox()

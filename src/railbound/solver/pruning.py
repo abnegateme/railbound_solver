@@ -205,7 +205,11 @@ def _build_traversal_index(
         for transition in track.transitions:
             _add_transition(exits, track.cell, transition.entry_port, transition.exit_port)
     for rail in placement.rails:
-        transitions = rail_piece_transitions(rail.piece_kind, rail.orientation)
+        transitions = rail_piece_transitions(
+            rail.piece_kind,
+            rail.orientation,
+            rail.switch_output,
+        )
         ports = {
             port
             for transition in transitions

@@ -25,6 +25,7 @@ _SCHEMATIC_BUILDABLE = (232, 225, 243)
 _SCHEMATIC_BLOCKED = (95, 91, 100)
 _SCHEMATIC_TRACK = (55, 52, 58)
 _SCHEMATIC_SOLUTION_TRACK = (190, 92, 54)
+_SCHEMATIC_SWITCH_ROUTE = (55, 135, 210)
 _SCHEMATIC_OPEN_CELL = (40, 150, 220)
 _SCHEMATIC_GOAL = (70, 150, 80)
 _SCHEMATIC_ACTOR = (164, 80, 35)
@@ -186,7 +187,11 @@ def render_placement_schematic(
         center = _schematic_center(rail.cell, padding, cell_size)
         ports = {
             port
-            for transition in rail_piece_transitions(rail.piece_kind, rail.orientation)
+            for transition in rail_piece_transitions(
+                rail.piece_kind,
+                rail.orientation,
+                rail.switch_output,
+            )
             for port in (transition.entry_port, transition.exit_port)
         }
         for port in ports:
@@ -197,6 +202,28 @@ def render_placement_schematic(
                 _SCHEMATIC_SOLUTION_TRACK,
                 7,
                 cv2.LINE_AA,
+            )
+        if rail.switch_output is not None:
+            route = np.array(
+                [
+                    _schematic_port(rail.cell, rail.orientation, padding, cell_size),
+                    center,
+                    _schematic_port(
+                        rail.cell,
+                        rail.switch_output,
+                        padding,
+                        cell_size,
+                    ),
+                ],
+                dtype=np.int32,
+            )
+            cv2.polylines(
+                image,
+                [route],
+                isClosed=False,
+                color=_SCHEMATIC_SWITCH_ROUTE,
+                thickness=4,
+                lineType=cv2.LINE_AA,
             )
         cv2.circle(image, center, 5, _SCHEMATIC_SOLUTION_TRACK, thickness=-1, lineType=cv2.LINE_AA)
     _draw_schematic_entities(image, level, padding, cell_size)
@@ -210,6 +237,9 @@ def _draw_schematic_entities(
     cell_size: int,
 ) -> None:
     goal_cells = {arrival.target_cell for arrival in level.win_condition.required_arrivals}
+    arrival_order = {
+        actor_id: index for index, actor_id in enumerate(level.win_condition.arrival_order, start=1)
+    }
     for cell in goal_cells:
         cv2.circle(
             image,
@@ -227,6 +257,18 @@ def _draw_schematic_entities(
             _SCHEMATIC_ACTOR,
             lineType=cv2.LINE_AA,
         )
+        order = arrival_order.get(actor.id)
+        if order is not None:
+            cv2.putText(
+                image,
+                str(order),
+                (center[0] + cell_size // 6, center[1] - cell_size // 6),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                max(0.45, cell_size / 120),
+                _SCHEMATIC_ACTOR,
+                2,
+                cv2.LINE_AA,
+            )
 
     for cell, label in (
         *((item.cell, "S") for item in level.switches),

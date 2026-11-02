@@ -40,15 +40,21 @@ zero-based row and column coordinates.
 sample library. Green cards are accepted automatic matches, purple cards were
 reviewed manually, and red cards still need a decision. Choose a known type or
 create a reusable type directly on a card. Type-specific fields appear only
-when needed, for example the direction of a train. A completed manual decision
-is stored as recognition evidence; crops and review files do not need to be
-exported.
+when needed. A train has a direction and an optional positive **Arrival order**;
+filled order values must be unique and become the relative order in which those
+trains must reach their goals. A completed manual decision is stored as
+recognition evidence; crops and review files do not need to be exported.
 
 **Formalize level** becomes available only when every cell has a complete type
 whose graph-state compiler is implemented. It asks for the rail budget and,
 only when necessary, the target goal for each train. The resulting validated
 `Level` remains in memory and immediately opens as a schematic in the third
 workspace, **Level / solution**; it has no separate text editor.
+The current observed interactive inventory permits straight, curved, and
+three-port switch rails. Each switch candidate chooses one of four trunk
+directions and one of its two mutually opposite outputs. The abstract
+four-way `crossing` type is not offered until that mechanic is observed
+explicitly.
 Recognizable new mechanics may be recorded without data loss, but they remain
 visibly blocked from formalization until their topology/state compiler exists;
 they are never silently ignored.

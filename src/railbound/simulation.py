@@ -256,13 +256,20 @@ _PORT_OFFSETS: dict[Port, tuple[int, int]] = {
 }
 
 
-def initial_state(level: Level) -> SimulationState:
-    """Create the immutable tick-zero state for a level supported by M7.
+def initial_state(
+    level: Level,
+    board: CompiledBoard | None = None,
+) -> SimulationState:
+    """Create the immutable tick-zero state for a level and compiled placement.
 
     Actors and dynamic devices use stable ID order, so parsing order in a JSON
     document cannot affect movement, channel effects, or event sequencing.
     """
     _validate_supported_level(level)
+    if board is not None and board.level_id != level.id:
+        raise ValueError(f"compiled board targets {board.level_id!r}, not level {level.id!r}")
+    switches = level.switches if board is None else board.switches
+    gates = level.gates if board is None else board.gates
     actors = tuple(
         sorted(
             (
@@ -283,11 +290,11 @@ def initial_state(level: Level) -> SimulationState:
         arrival_order=level.win_condition.arrival_order,
         switch_states=tuple(
             SwitchState(switch_id=switch.id, selected_output=switch.initial_output)
-            for switch in sorted(level.switches, key=lambda switch: switch.id)
+            for switch in sorted(switches, key=lambda switch: switch.id)
         ),
         gate_states=tuple(
             GateState(gate_id=gate.id, status=GateStatus(gate.initial_state))
-            for gate in sorted(level.gates, key=lambda gate: gate.id)
+            for gate in sorted(gates, key=lambda gate: gate.id)
         ),
     )
 
@@ -304,8 +311,8 @@ def simulate(
     same way as a derailment or collision.
     """
     active_options = options or SimulationOptions()
-    state = initial_state(level)
     board = compile_board(level, placement)
+    state = initial_state(level, board)
     events: tuple[SimulationEvent, ...] = ()
     while state.status is SimulationStatus.RUNNING:
         if state.tick >= active_options.max_ticks:

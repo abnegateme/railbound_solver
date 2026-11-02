@@ -41,7 +41,7 @@ save_level(level, Path("output/level.json"))
 | `actors` | Required initial actors, with position, travel direction, type, and optional number/color. |
 | `switches`, `buttons`, `gates`, `tunnel_endpoints` | Optional device layers with observed M7 runtime behavior. |
 | `rail_inventory` | A non-negative `total_budget`, per-`piece_kind` counts, or both. |
-| `win_condition` | Required arrivals, their optional ordering, and/or required actor couplings. |
+| `win_condition` | Required arrivals, their optional actor-ID ordering, and/or required actor couplings. |
 
 `CellCoord` is shared with grid calibration but has a different role here: it
 is a semantic cell, not an image measurement. Coordinates must be in bounds
@@ -52,6 +52,8 @@ wherever they appear.
 Ports are the cell-edge strings `N`, `E`, `S`, and `W`. A `fixed_tracks` item
 lists each used port exactly once and contains transitions that pair those
 ports. A straight or curve has one pair; a crossing has two independent pairs.
+That independence is topological only: simultaneous actors still collide in
+one cell. The same rail may be reused by another actor on a later tick.
 The validator rejects duplicated ports, ports missing from transitions, and
 transitions that mention undeclared ports. `fixed_tracks` must have `fixed` set
 to `true`. Placeable rails live in the separate M5 `RailPlacement` document,
@@ -68,6 +70,9 @@ has one entry and two distinct outputs, and its initial output must be one of
 them. A switch may declare a button `channel`; it is otherwise fixed at its
 initial output. Buttons use the observed `toggle` activation behavior, and
 every button channel must control at least one same-channel gate or switch.
+Placeable base switches use the same asymmetric routing model without a
+channel: either of the two opposite outputs merges into the perpendicular
+trunk, while entry from the trunk takes the configured output.
 
 At runtime, entering a button toggles every same-channel gate and switch after
 the tick's movements resolve. A closed gate blocks entry to its cell. Entering

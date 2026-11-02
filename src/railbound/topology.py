@@ -42,21 +42,37 @@ class RailPieceKind(StrEnum):
 
     STRAIGHT = "straight"
     CURVE = "curve"
+    SWITCH = "switch"
     CROSSING = "crossing"
 
 
 class PlacedRail(_FrozenModel):
-    """One static rail selected for a buildable cell.
+    """One rail selected for a buildable cell.
 
     ``orientation`` rotates the shape's canonical north-facing definition
-    clockwise.  Rotations that happen to produce identical topology (such as
-    a north- and south-oriented straight) are retained as authored; M5 does
-    not yet choose canonical representations for search.
+    clockwise.  For a switch it identifies the perpendicular trunk port and
+    ``switch_output`` selects one of the two mutually opposite outputs;
+    trains entering either output merge into the trunk, while a train entering
+    the trunk leaves through ``switch_output``.
     """
 
     cell: CellCoord
     piece_kind: RailPieceKind
     orientation: Port = Port.NORTH
+    switch_output: Port | None = None
+
+    @model_validator(mode="after")
+    def valid_switch_shape(self) -> Self:
+        """Require exactly one selected output on a switch rail."""
+        if self.piece_kind is not RailPieceKind.SWITCH:
+            if self.switch_output is not None:
+                raise ValueError("switch_output is only valid for a switch rail")
+            return self
+        if self.switch_output is None:
+            raise ValueError("a switch rail must declare switch_output")
+        if not _ports_are_perpendicular(self.orientation, self.switch_output):
+            raise ValueError("a switch output must be perpendicular to its trunk")
+        return self
 
 
 class RailPlacement(_FrozenModel):
@@ -112,6 +128,7 @@ class CompiledPiece:
     id: str | None = None
     piece_kind: RailPieceKind | None = None
     orientation: Port | None = None
+    switch_output: Port | None = None
 
     def transition(self, entry_port: Port) -> Port | None:
         """Return the paired exit port for an entry, or ``None`` if absent."""
@@ -212,9 +229,31 @@ _CANONICAL_TRANSITIONS: Final[dict[RailPieceKind, tuple[tuple[Port, Port], ...]]
 
 
 def rail_piece_transitions(
-    piece_kind: RailPieceKind, orientation: Port = Port.NORTH
+    piece_kind: RailPieceKind,
+    orientation: Port = Port.NORTH,
+    switch_output: Port | None = None,
 ) -> tuple[TrackTransition, ...]:
-    """Return the internal transitions for a rotated placeable rail shape."""
+    """Return the possible internal transitions of a placeable rail shape.
+
+    Switch transitions describe its complete three-port topology for graph
+    inspection and optimistic reachability.  Runtime movement remains
+    asymmetric and follows the corresponding :class:`Switch` state.
+    """
+    if piece_kind is RailPieceKind.SWITCH:
+        if switch_output is None or not _ports_are_perpendicular(orientation, switch_output):
+            raise ValueError("a switch rail requires a perpendicular switch_output")
+        return (
+            TrackTransition(
+                entry_port=orientation,
+                exit_port=switch_output,
+            ),
+            TrackTransition(
+                entry_port=orientation,
+                exit_port=_OPPOSITE_PORT[switch_output],
+            ),
+        )
+    if switch_output is not None:
+        raise ValueError("switch_output is only valid for a switch rail")
     return tuple(
         TrackTransition(
             entry_port=_rotate_port(entry_port, orientation),
@@ -342,7 +381,14 @@ def compile_board(level: Level, placement: RailPlacement) -> CompiledBoard:
         boundary_exits=boundary_exits,
         unconnected_ports=unconnected_ports,
         connected_components=connected_components,
-        switches=level.switches,
+        switches=(
+            *level.switches,
+            *(
+                _compile_placed_switch(rail)
+                for rail in placement.rails
+                if rail.piece_kind is RailPieceKind.SWITCH
+            ),
+        ),
         buttons=level.buttons,
         gates=level.gates,
         tunnel_endpoints=level.tunnel_endpoints,
@@ -362,14 +408,19 @@ def _compile_fixed_piece(track: TrackPiece) -> CompiledPiece:
 
 def _compile_placed_rail(rail: PlacedRail) -> CompiledPiece:
     """Resolve a shape definition and rotation for one placed rail."""
-    transitions = rail_piece_transitions(rail.piece_kind, rail.orientation)
+    possible_transitions = rail_piece_transitions(
+        rail.piece_kind,
+        rail.orientation,
+        rail.switch_output,
+    )
+    transitions = () if rail.piece_kind is RailPieceKind.SWITCH else possible_transitions
     ports = tuple(
         sorted(
-            (
+            {
                 port
-                for transition in transitions
+                for transition in possible_transitions
                 for port in (transition.entry_port, transition.exit_port)
-            ),
+            },
             key=_PORT_RANK.__getitem__,
         )
     )
@@ -380,12 +431,33 @@ def _compile_placed_rail(rail: PlacedRail) -> CompiledPiece:
         source="placement",
         piece_kind=rail.piece_kind,
         orientation=rail.orientation,
+        switch_output=rail.switch_output,
+    )
+
+
+def _compile_placed_switch(rail: PlacedRail) -> Switch:
+    """Turn a validated placeable switch rail into runtime routing state."""
+    output = rail.switch_output
+    if output is None:  # Guard direct internal calls as well as model validation.
+        raise ValueError("a switch rail must declare switch_output")
+    return Switch(
+        id=f"placement:switch:r{rail.cell.row}-c{rail.cell.col}",
+        cell=rail.cell,
+        entry_port=rail.orientation,
+        output_ports=(output, _OPPOSITE_PORT[output]),
+        initial_output=output,
     )
 
 
 def _rotate_port(port: Port, orientation: Port) -> Port:
     """Rotate a canonical port clockwise so canonical north maps to orientation."""
     return _PORTS_CLOCKWISE[(_PORT_RANK[port] + _PORT_RANK[orientation]) % len(_PORTS_CLOCKWISE)]
+
+
+def _ports_are_perpendicular(first: Port, second: Port) -> bool:
+    """Return whether two cell-edge ports lie on different axes."""
+    vertical = {Port.NORTH, Port.SOUTH}
+    return (first in vertical) != (second in vertical)
 
 
 def _neighbouring_port(node: PortNode) -> PortNode:

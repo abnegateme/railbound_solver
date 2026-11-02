@@ -214,13 +214,22 @@ class SearchBenchmark:
 _PIECE_KINDS: tuple[RailPieceKind, ...] = (
     RailPieceKind.STRAIGHT,
     RailPieceKind.CURVE,
+    RailPieceKind.SWITCH,
     RailPieceKind.CROSSING,
 )
 _ORIENTATIONS: dict[RailPieceKind, tuple[Port, ...]] = {
     RailPieceKind.STRAIGHT: (Port.NORTH, Port.EAST),
     RailPieceKind.CURVE: (Port.NORTH, Port.EAST, Port.SOUTH, Port.WEST),
+    RailPieceKind.SWITCH: (Port.NORTH, Port.EAST, Port.SOUTH, Port.WEST),
     RailPieceKind.CROSSING: (Port.NORTH,),
 }
+_SWITCH_OUTPUTS: dict[Port, tuple[Port, Port]] = {
+    Port.NORTH: (Port.EAST, Port.WEST),
+    Port.EAST: (Port.SOUTH, Port.NORTH),
+    Port.SOUTH: (Port.WEST, Port.EAST),
+    Port.WEST: (Port.NORTH, Port.SOUTH),
+}
+type _RailOption = tuple[RailPieceKind, Port, Port | None]
 
 
 @dataclass(slots=True)
@@ -259,7 +268,8 @@ def iter_placement_candidates(
     one.  Cells are ordered by ``(row, col)``; within a cell, shapes use the
     declared :class:`RailPieceKind` order and orientations use clockwise port
     order.  Topologically duplicate rotations are intentionally omitted:
-    straights use ``N`` and ``E``, and crossings use ``N`` only.
+    straights use ``N`` and ``E``; switches enumerate four trunk directions
+    and their two perpendicular branches; crossings use ``N`` only.
     """
     if max_rails is not None and max_rails < 0:
         raise ValueError("max_rails must be non-negative or None")
@@ -557,11 +567,18 @@ def _assign_piece_kinds(
                     key=lambda option: _piece_option_key(level, cell, option),
                 )
             )
-        for piece_kind, orientation in options:
+        for piece_kind, orientation, switch_output in options:
             limit = kind_limits[piece_kind]
             if limit is not None and used_by_kind.get(piece_kind, 0) >= limit:
                 continue
-            rails.append(PlacedRail(cell=cell, piece_kind=piece_kind, orientation=orientation))
+            rails.append(
+                PlacedRail(
+                    cell=cell,
+                    piece_kind=piece_kind,
+                    orientation=orientation,
+                    switch_output=switch_output,
+                )
+            )
             used_by_kind[piece_kind] = used_by_kind.get(piece_kind, 0) + 1
             yield from visit(cell_index + 1)
             used_by_kind[piece_kind] -= 1
@@ -574,14 +591,25 @@ def _assign_piece_kinds(
 
 def _rail_options(
     kind_limits: dict[RailPieceKind, int | None],
-) -> tuple[tuple[RailPieceKind, Port], ...]:
+) -> tuple[_RailOption, ...]:
     """Return canonical shape/orientation pairs allowed by the inventory."""
     return tuple(
-        (piece_kind, orientation)
+        (piece_kind, orientation, switch_output)
         for piece_kind in _PIECE_KINDS
         if piece_kind in kind_limits
         for orientation in _ORIENTATIONS[piece_kind]
+        for switch_output in _switch_output_options(piece_kind, orientation)
     )
+
+
+def _switch_output_options(
+    piece_kind: RailPieceKind,
+    orientation: Port,
+) -> tuple[Port | None, ...]:
+    """Return the two selected outputs of a switch or one empty variant."""
+    if piece_kind is RailPieceKind.SWITCH:
+        return _SWITCH_OUTPUTS[orientation]
+    return (None,)
 
 
 def _heuristic_cell_key(level: Level, cell: CellCoord) -> tuple[int, int, int, int]:
@@ -608,13 +636,13 @@ def _assignment_cell_key(level: Level, cell: CellCoord) -> tuple[int, int, int, 
 def _piece_option_key(
     level: Level,
     cell: CellCoord,
-    option: tuple[RailPieceKind, Port],
-) -> tuple[int, int, int]:
+    option: _RailOption,
+) -> tuple[int, int, int, int]:
     """Prefer a shape containing ports demanded at an actor or exact goal."""
-    piece_kind, orientation = option
+    piece_kind, orientation, switch_output = option
     ports = {
         port
-        for transition in rail_piece_transitions(piece_kind, orientation)
+        for transition in rail_piece_transitions(piece_kind, orientation, switch_output)
         for port in (transition.entry_port, transition.exit_port)
     }
     demanded = {
@@ -628,7 +656,8 @@ def _piece_option_key(
     matches = len(ports & demanded)
     kind_rank = _PIECE_KINDS.index(piece_kind)
     orientation_rank = _ORIENTATIONS[piece_kind].index(orientation)
-    return -matches, kind_rank, orientation_rank
+    output_rank = _switch_output_options(piece_kind, orientation).index(switch_output)
+    return -matches, kind_rank, orientation_rank, output_rank
 
 
 def _manhattan(first: CellCoord, second: CellCoord) -> int:
@@ -661,7 +690,7 @@ def _replay_candidate(
         )
 
     board = compile_board(level, placement)
-    state = initial_state(level)
+    state = initial_state(level, board)
     events: list[SimulationEvent] = []
     visited = {_runtime_state_key(state)}
     runtime_states_visited = 1
@@ -736,22 +765,24 @@ def _placements_with_rail_count(
         last_start = len(cells) - remaining + 1
         for cell_index in range(first_cell_index, last_start):
             cell = cells[cell_index]
-            for piece_kind in _PIECE_KINDS:
+            for piece_kind, orientation, switch_output in _rail_options(kind_limits):
                 limit = kind_limits.get(piece_kind)
-                if limit is None and piece_kind not in kind_limits:
-                    continue
                 if limit is not None and used_by_kind.get(piece_kind, 0) >= limit:
                     continue
-                for orientation in _ORIENTATIONS[piece_kind]:
-                    rails.append(
-                        PlacedRail(cell=cell, piece_kind=piece_kind, orientation=orientation)
+                rails.append(
+                    PlacedRail(
+                        cell=cell,
+                        piece_kind=piece_kind,
+                        orientation=orientation,
+                        switch_output=switch_output,
                     )
-                    used_by_kind[piece_kind] = used_by_kind.get(piece_kind, 0) + 1
-                    yield from visit(cell_index + 1)
-                    used_by_kind[piece_kind] -= 1
-                    if used_by_kind[piece_kind] == 0:
-                        del used_by_kind[piece_kind]
-                    rails.pop()
+                )
+                used_by_kind[piece_kind] = used_by_kind.get(piece_kind, 0) + 1
+                yield from visit(cell_index + 1)
+                used_by_kind[piece_kind] -= 1
+                if used_by_kind[piece_kind] == 0:
+                    del used_by_kind[piece_kind]
+                rails.pop()
 
     yield from visit(0)
 

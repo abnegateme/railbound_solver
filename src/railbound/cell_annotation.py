@@ -18,6 +18,7 @@ from railbound.level import (
     LevelMetadata,
     Port,
     RailInventory,
+    RailPieceCount,
     TerrainCell,
     TrackPiece,
     TrackTransition,
@@ -40,11 +41,17 @@ class CellPropertyDefinition(_FrozenModel):
     value_kind: PropertyKind
     required: bool = True
     choices: tuple[str, ...] = ()
+    minimum: int | None = None
+    maximum: int | None = None
 
     @model_validator(mode="after")
-    def choices_match_value_kind(self) -> Self:
+    def valid_constraints(self) -> Self:
         if self.choices and self.value_kind != "text":
             raise ValueError("only text properties may declare choices")
+        if (self.minimum is not None or self.maximum is not None) and self.value_kind != "integer":
+            raise ValueError("only integer properties may declare numeric bounds")
+        if self.minimum is not None and self.maximum is not None and self.minimum > self.maximum:
+            raise ValueError("property minimum cannot exceed maximum")
         if len(set(self.choices)) != len(self.choices):
             raise ValueError("property choices must be unique")
         return self
@@ -82,6 +89,7 @@ class ActorFeature(_FrozenModel):
     direction_property: Identifier = "direction"
     number_property: Identifier | None = None
     color_property: Identifier | None = None
+    arrival_order_property: Identifier | None = None
 
 
 class GoalFeature(_FrozenModel):
@@ -222,10 +230,17 @@ def built_in_cell_types() -> tuple[CellTypeDefinition, ...]:
             display_name="Train",
             properties=(
                 CellPropertyDefinition(id="direction", label="Direction", value_kind="direction"),
+                CellPropertyDefinition(
+                    id="arrival_order",
+                    label="Arrival order",
+                    value_kind="integer",
+                    required=False,
+                    minimum=1,
+                ),
             ),
             features=(
                 TerrainFeature(terrain_kind="terrain.empty", buildable=True),
-                ActorFeature(),
+                ActorFeature(arrival_order_property="arrival_order"),
             ),
         ),
         CellTypeDefinition(
@@ -255,10 +270,17 @@ def cell_type_for_role(
     elif role == "train":
         features = (
             TerrainFeature(terrain_kind="terrain.empty", buildable=True),
-            ActorFeature(),
+            ActorFeature(arrival_order_property="arrival_order"),
         )
         properties = (
             CellPropertyDefinition(id="direction", label="Direction", value_kind="direction"),
+            CellPropertyDefinition(
+                id="arrival_order",
+                label="Arrival order",
+                value_kind="integer",
+                required=False,
+                minimum=1,
+            ),
         )
     elif role == "goal":
         features = (
@@ -372,6 +394,7 @@ def formalize_annotations(
     buildable_cells: list[CellCoord] = []
     fixed_tracks: list[TrackPiece] = []
     actors: list[Actor] = []
+    arrival_orders: dict[str, int] = {}
     goals: dict[CellCoord, Port | None] = {}
     for annotation in annotations:
         if annotation.type_id is None:
@@ -416,6 +439,18 @@ def formalize_annotations(
                         color=color if isinstance(color, str) else None,
                     )
                 )
+                if feature.arrival_order_property is not None:
+                    arrival_order = annotation.properties.get(feature.arrival_order_property)
+                    if arrival_order is not None:
+                        if (
+                            not isinstance(arrival_order, int)
+                            or isinstance(arrival_order, bool)
+                            or arrival_order < 1
+                        ):
+                            raise ValueError(
+                                f"actor {annotation.id!r} has an invalid arrival order"
+                            )
+                        arrival_orders[annotation.id] = arrival_order
             elif isinstance(feature, GoalFeature):
                 entry_port: Port | None = None
                 if feature.entry_port_property is not None:
@@ -447,6 +482,21 @@ def formalize_annotations(
         )
 
     level_id = make_level_id(level_number)
+    order_counts = {
+        value: tuple(actor_id for actor_id, order in arrival_orders.items() if order == value)
+        for value in set(arrival_orders.values())
+    }
+    duplicate_orders = sorted(
+        value for value, actor_ids in order_counts.items() if len(actor_ids) > 1
+    )
+    if duplicate_orders:
+        raise ValueError(
+            "train arrival order values must be unique: "
+            + ", ".join(str(value) for value in duplicate_orders)
+        )
+    arrival_order = tuple(
+        actor_id for actor_id, _order in sorted(arrival_orders.items(), key=lambda item: item[1])
+    )
     fixed_track_cells = {track.cell for track in fixed_tracks}
     return Level(
         id=level_id,
@@ -459,8 +509,18 @@ def formalize_annotations(
         ),
         fixed_tracks=tuple(fixed_tracks),
         actors=tuple(actors),
-        rail_inventory=RailInventory(total_budget=rail_budget),
-        win_condition=WinCondition(required_arrivals=tuple(arrivals)),
+        rail_inventory=RailInventory(
+            total_budget=rail_budget,
+            piece_counts=(
+                RailPieceCount(piece_kind="straight", count=rail_budget),
+                RailPieceCount(piece_kind="curve", count=rail_budget),
+                RailPieceCount(piece_kind="switch", count=rail_budget),
+            ),
+        ),
+        win_condition=WinCondition(
+            required_arrivals=tuple(arrivals),
+            arrival_order=arrival_order,
+        ),
     )
 
 
@@ -478,6 +538,7 @@ def _feature_property_references(feature: CellFeature) -> set[str]:
                 feature.direction_property,
                 feature.number_property,
                 feature.color_property,
+                feature.arrival_order_property,
             )
             if value is not None
         }
@@ -510,6 +571,13 @@ def _validate_feature_property_kinds(
             _require_property_kind(properties, feature.number_property, "integer", feature.kind)
         if feature.color_property is not None:
             _require_property_kind(properties, feature.color_property, "text", feature.kind)
+        if feature.arrival_order_property is not None:
+            _require_property_kind(
+                properties,
+                feature.arrival_order_property,
+                "integer",
+                feature.kind,
+            )
     elif isinstance(feature, GoalFeature) and feature.entry_port_property is not None:
         _require_port_property(properties, feature.entry_port_property, feature.kind)
     elif isinstance(feature, StateFeature):
@@ -559,7 +627,12 @@ def _valid_property_value(value: PropertyValue, definition: CellPropertyDefiniti
     if definition.value_kind == "text":
         return isinstance(value, str) and (not definition.choices or value in definition.choices)
     if definition.value_kind == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
+        return (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and (definition.minimum is None or value >= definition.minimum)
+            and (definition.maximum is None or value <= definition.maximum)
+        )
     return isinstance(value, bool)
 
 
