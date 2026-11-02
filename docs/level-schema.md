@@ -36,7 +36,7 @@ save_level(level, Path("output/level.json"))
 | `rows`, `cols` | Positive board dimensions. All coordinates are zero-based `(row, col)`. |
 | `metadata` | Optional human-readable `title`, `world`, and `source`. |
 | `terrain` | Optional descriptive terrain labels; these do not imply simulator behavior yet. |
-| `buildable_cells` | Cells in which a future `RailPlacement` may propose a rail. |
+| `buildable_cells` | The complete set of cells in which a future `RailPlacement` may propose a rail. Obstacles are excluded. |
 | `fixed_tracks` | Immutable track pieces, specified by ports and internal transitions; one-port pieces are terminals. |
 | `actors` | Required initial actors, with position, travel direction, type, and optional number/color. |
 | `switches`, `buttons`, `gates`, `tunnel_endpoints` | Optional device layers with observed M7 runtime behavior. |
@@ -46,6 +46,13 @@ save_level(level, Path("output/level.json"))
 `CellCoord` is shared with grid calibration but has a different role here: it
 is a semantic cell, not an image measurement. Coordinates must be in bounds
 wherever they appear.
+
+Only cells listed in `buildable_cells` may receive a placed rail. An obstacle
+annotation contributes terrain evidence but no buildable cell or fixed track,
+so it cannot participate in a route. Neither fixed nor placed neighbouring
+topology may expose a port towards such a cell. This rule is based on formal
+cell capabilities rather than a particular terrain label, allowing future
+obstacle types to remain blocked without solver-specific cases.
 
 ## Track topology
 

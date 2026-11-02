@@ -320,7 +320,10 @@ class Level(_FrozenModel):
         }
         for track in self.fixed_tracks:
             for port in track.ports:
-                if (_cell_key(track.cell), port) in actor_rear_ports:
+                neighbour = self._neighbour_cell(track.cell, port)
+                if (_cell_key(track.cell), port) in actor_rear_ports and not self.is_in_bounds(
+                    neighbour
+                ):
                     continue
                 self._validate_inward_port(track.cell, port, f"fixed track {track.id!r}")
         for switch in self.switches:
@@ -377,6 +380,18 @@ class Level(_FrozenModel):
         """Return whether a semantic cell lies within this level's dimensions."""
         return 0 <= cell.row < self.rows and 0 <= cell.col < self.cols
 
+    @property
+    def rail_capable_cells(self) -> frozenset[CellCoord]:
+        """Return cells that may contain or already provide rail topology."""
+        return frozenset(
+            (
+                *self.buildable_cells,
+                *(track.cell for track in self.fixed_tracks),
+                *(switch.cell for switch in self.switches),
+                *(endpoint.cell for endpoint in self.tunnel_endpoints),
+            )
+        )
+
     def _validate_cells(
         self,
         values: tuple[Value, ...],
@@ -402,18 +417,28 @@ class Level(_FrozenModel):
             raise ValueError(f"{name} contains duplicate cell ({row}, {col})")
 
     def _validate_inward_port(self, cell: CellCoord, port: Port, name: str) -> None:
-        """Reject a rail/device port that faces beyond the finite grid."""
+        """Reject a rail/device port facing outside usable rail cells."""
+        neighbour = self._neighbour_cell(cell, port)
+        if not self.is_in_bounds(neighbour):
+            raise ValueError(
+                f"{name} at ({cell.row}, {cell.col}) points outside the grid through {port.value}"
+            )
+        if neighbour not in self.rail_capable_cells:
+            raise ValueError(
+                f"{name} at ({cell.row}, {cell.col}) points into blocked cell "
+                f"({neighbour.row}, {neighbour.col}) through {port.value}"
+            )
+
+    @staticmethod
+    def _neighbour_cell(cell: CellCoord, port: Port) -> CellCoord:
+        """Return the cell reached through one edge port."""
         row_delta, col_delta = {
             Port.NORTH: (-1, 0),
             Port.EAST: (0, 1),
             Port.SOUTH: (1, 0),
             Port.WEST: (0, -1),
         }[port]
-        neighbour = CellCoord(row=cell.row + row_delta, col=cell.col + col_delta)
-        if not self.is_in_bounds(neighbour):
-            raise ValueError(
-                f"{name} at ({cell.row}, {cell.col}) points outside the grid through {port.value}"
-            )
+        return CellCoord(row=cell.row + row_delta, col=cell.col + col_delta)
 
     def _validate_win_condition_references(self, actor_ids: set[str]) -> None:
         referenced_actor_ids = [

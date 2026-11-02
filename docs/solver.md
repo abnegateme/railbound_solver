@@ -62,7 +62,9 @@ authoritative replay state and therefore filters solver results.
 Actor starts and arrival targets are fixed oriented topology rather than
 placement cells: starts use an aligned straight and targets use a one-port
 terminal. They may be visited again on a later tick. Candidate generation
-rejects every rail orientation with a port facing outside the grid.
+uses only `buildable_cells`, so obstacles cannot receive rails or participate
+in a route. It also rejects every rail orientation with a port facing outside
+the grid or into an obstacle.
 The rear port beneath an actor already standing at the edge is only a virtual
 initial entry and is exempt; the actor's first movement must point in bounds.
 Interactive formalization exposes the observed straight, curved, and

@@ -301,6 +301,27 @@ def validate_placement(level: Level, placement: RailPlacement) -> None:
         row, col, port = outward_ports[0]
         raise ValueError(f"rail placement at ({row}, {col}) points outside the grid through {port}")
 
+    rail_capable_cells = level.rail_capable_cells
+    blocked_ports = sorted(
+        (
+            rail.cell.row,
+            rail.cell.col,
+            port.value,
+            neighbour.cell.row,
+            neighbour.cell.col,
+        )
+        for rail in placement.rails
+        for port in _placed_rail_ports(rail)
+        for neighbour in (_neighbouring_port(PortNode(rail.cell, port)),)
+        if level.is_in_bounds(neighbour.cell) and neighbour.cell not in rail_capable_cells
+    )
+    if blocked_ports:
+        row, col, port, target_row, target_col = blocked_ports[0]
+        raise ValueError(
+            f"rail placement at ({row}, {col}) points into blocked cell "
+            f"({target_row}, {target_col}) through {port}"
+        )
+
     rail_count = len(placement.rails)
     if (
         level.rail_inventory.total_budget is not None

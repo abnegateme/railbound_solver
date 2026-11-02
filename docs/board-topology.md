@@ -45,6 +45,10 @@ Each rail must be on one of the level's `buildable_cells`. The level's
 `total_budget`, when present, limits all rails. A non-empty `piece_counts`
 list both limits the named kinds and excludes unnamed kinds from the placement.
 A placement is invalid when any of its ports faces beyond the finite grid.
+Cells omitted from `buildable_cells`, including obstacles, cannot receive a
+rail; without separate fixed topology they are absent from the compiled port
+graph and cannot be crossed by a route. A placed rail is also invalid when one
+of its ports points into such a blocked cell.
 
 ## Static rail definitions
 

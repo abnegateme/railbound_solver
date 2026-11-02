@@ -281,6 +281,7 @@ def iter_placement_candidates(
         raise ValueError("max_rails must be non-negative or None")
 
     cells = tuple(sorted(level.buildable_cells, key=_cell_key))
+    rail_capable_cells = level.rail_capable_cells
     kind_limits = _kind_limits(level)
     capacity = _placement_capacity(level, cells=cells, kind_limits=kind_limits)
     if max_rails is not None:
@@ -289,9 +290,8 @@ def iter_placement_candidates(
     for rail_count in range(capacity + 1):
         yield from _placements_with_rail_count(
             level_id=level.id,
-            rows=level.rows,
-            cols=level.cols,
             cells=cells,
+            rail_capable_cells=rail_capable_cells,
             rail_count=rail_count,
             kind_limits=kind_limits,
         )
@@ -541,6 +541,7 @@ def _assign_piece_kinds(
     """Assign rail topology to a fixed cell set with optimistic look-ahead."""
     rails: list[PlacedRail] = []
     used_by_kind: dict[RailPieceKind, int] = {}
+    rail_capable_cells = level.rail_capable_cells
 
     def visit(cell_index: int) -> Iterator[RailPlacement]:
         open_cells = selected_cells[cell_index:]
@@ -570,11 +571,10 @@ def _assign_piece_kinds(
         options = tuple(
             option
             for option in _rail_options(kind_limits)
-            if _rail_option_fits_grid(
+            if _rail_option_fits_level(
                 cell,
                 option,
-                rows=level.rows,
-                cols=level.cols,
+                rail_capable_cells=rail_capable_cells,
             )
         )
         if heuristic_ordering:
@@ -629,14 +629,13 @@ def _switch_output_options(
     return (None,)
 
 
-def _rail_option_fits_grid(
+def _rail_option_fits_level(
     cell: CellCoord,
     option: _RailOption,
     *,
-    rows: int,
-    cols: int,
+    rail_capable_cells: frozenset[CellCoord],
 ) -> bool:
-    """Reject a rail shape with any port facing beyond the finite board."""
+    """Reject a rail shape with any port facing outside usable rail cells."""
     piece_kind, orientation, switch_output = option
     ports = {
         port
@@ -644,8 +643,11 @@ def _rail_option_fits_grid(
         for port in (transition.entry_port, transition.exit_port)
     }
     return all(
-        0 <= cell.row + _PORT_OFFSETS[port][0] < rows
-        and 0 <= cell.col + _PORT_OFFSETS[port][1] < cols
+        CellCoord(
+            row=cell.row + _PORT_OFFSETS[port][0],
+            col=cell.col + _PORT_OFFSETS[port][1],
+        )
+        in rail_capable_cells
         for port in ports
     )
 
@@ -786,9 +788,8 @@ def _runtime_state_key(state: SimulationState) -> tuple[object, ...]:
 def _placements_with_rail_count(
     *,
     level_id: str,
-    rows: int,
-    cols: int,
     cells: tuple[CellCoord, ...],
+    rail_capable_cells: frozenset[CellCoord],
     rail_count: int,
     kind_limits: dict[RailPieceKind, int | None],
 ) -> Iterator[RailPlacement]:
@@ -807,11 +808,10 @@ def _placements_with_rail_count(
             cell = cells[cell_index]
             for piece_kind, orientation, switch_output in _rail_options(kind_limits):
                 option = (piece_kind, orientation, switch_output)
-                if not _rail_option_fits_grid(
+                if not _rail_option_fits_level(
                     cell,
                     option,
-                    rows=rows,
-                    cols=cols,
+                    rail_capable_cells=rail_capable_cells,
                 ):
                     continue
                 limit = kind_limits.get(piece_kind)
