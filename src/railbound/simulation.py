@@ -530,10 +530,13 @@ def _internal_exit_port(
     """Follow a dynamic switch or static rail transition inside one cell."""
     switch = _switch_at(cell, board)
     if switch is not None:
+        selected_output = switch_outputs[switch.id]
         if entry_port == switch.entry_port:
-            return switch_outputs[switch.id]
-        if entry_port in switch.output_ports:
+            return selected_output
+        if entry_port == selected_output:
             return switch.entry_port
+        if entry_port in switch.output_ports:
+            return selected_output
         return None
     exit_node = board.transition(PortNode(cell, entry_port))
     return None if exit_node is None else exit_node.port

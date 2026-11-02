@@ -143,12 +143,13 @@ class Actor(_FrozenModel):
 
 
 class Switch(_FrozenModel):
-    """A three-port junction whose selected branch may share a button channel.
+    """A three-port junction whose selected route may share a button channel.
 
-    A train entering ``entry_port`` leaves through ``initial_output``.  A
-    train entering either output always merges onto ``entry_port``.  A switch
-    with no ``channel`` is fixed for the duration of a replay; one with a
-    channel toggles when an actor enters a matching button.
+    ``output_ports`` are opposite each other and ``entry_port`` is the
+    perpendicular branch.  The selected output connects bidirectionally to
+    that branch, while the other output merges one-way into the selected
+    output.  A switch with no ``channel`` is fixed for the duration of a
+    replay; one with a channel toggles when an actor enters a matching button.
     """
 
     id: Identifier
@@ -160,11 +161,13 @@ class Switch(_FrozenModel):
 
     @model_validator(mode="after")
     def valid_outputs(self) -> Self:
-        """Require one entry and two distinct selectable outputs."""
+        """Require a perpendicular branch and two opposite selectable ports."""
         if self.entry_port in self.output_ports:
             raise ValueError("a switch entry port cannot also be an output port")
         if self.output_ports[0] == self.output_ports[1]:
             raise ValueError("a switch must have two distinct output ports")
+        if _opposite_port(self.output_ports[0]) != self.output_ports[1]:
+            raise ValueError("switch output ports must be opposite each other")
         if self.initial_output not in self.output_ports:
             raise ValueError("a switch initial_output must be one of its output_ports")
         return self

@@ -83,8 +83,10 @@ them. A switch may declare a button `channel`; it is otherwise fixed at its
 initial output. Buttons use the observed `toggle` activation behavior, and
 every button channel must control at least one same-channel gate or switch.
 Placeable base switches use the same asymmetric routing model without a
-channel: either of the two opposite outputs merges into the perpendicular
-trunk, while entry from the trunk takes the configured output.
+channel. The perpendicular branch and selected main-line port connect in both
+directions; the other main-line port merges one-way into the selected port.
+The reverse transition from the selected port to the other main-line port is
+not available.
 
 At runtime, entering a button toggles every same-channel gate and switch after
 the tick's movements resolve. A closed gate blocks entry to its cell. Entering

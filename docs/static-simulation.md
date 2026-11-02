@@ -42,11 +42,11 @@ Every `step()` uses one immutable input state:
 
 1. Derive a move intent for each active actor, sorted by actor ID, using gate
    and switch values from the beginning of the tick.
-2. A switch routes an actor from its trunk `entry_port` to its selected output;
-   entry from either of the two opposite outputs merges back onto the
-   perpendicular trunk. A base placeable switch has no channel. A tunnel
-   transfers an actor from its entered endpoint to the paired endpoint's
-   `exit_port` in the same tick.
+2. A switch connects its perpendicular `entry_port` bidirectionally with the
+   selected main-line output. Entry from the other main-line port merges
+   one-way into the selected output; the reverse transition is unavailable.
+   A base placeable switch has no channel. A tunnel transfers an actor from
+   its entered endpoint to the paired endpoint's `exit_port` in the same tick.
 3. If an intent cannot enter a track, is blocked by a closed gate, reaches an
    unconnected port, or exits the board, finish atomically with the first
    actor-ID-ordered failure.

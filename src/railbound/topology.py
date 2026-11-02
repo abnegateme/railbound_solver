@@ -50,10 +50,10 @@ class PlacedRail(_FrozenModel):
     """One rail selected for a buildable cell.
 
     ``orientation`` rotates the shape's canonical north-facing definition
-    clockwise.  For a switch it identifies the perpendicular trunk port and
-    ``switch_output`` selects one of the two mutually opposite outputs;
-    trains entering either output merge into the trunk, while a train entering
-    the trunk leaves through ``switch_output``.
+    clockwise.  For a switch it identifies the perpendicular branch and
+    ``switch_output`` selects one of the two mutually opposite main-line
+    ports.  The branch connects bidirectionally to the selected port; the
+    other main-line port merges one-way into it.
     """
 
     cell: CellCoord
@@ -71,7 +71,7 @@ class PlacedRail(_FrozenModel):
         if self.switch_output is None:
             raise ValueError("a switch rail must declare switch_output")
         if not _ports_are_perpendicular(self.orientation, self.switch_output):
-            raise ValueError("a switch output must be perpendicular to its trunk")
+            raise ValueError("a switch output must be perpendicular to its branch")
         return self
 
 
@@ -248,8 +248,8 @@ def rail_piece_transitions(
                 exit_port=switch_output,
             ),
             TrackTransition(
-                entry_port=orientation,
-                exit_port=_OPPOSITE_PORT[switch_output],
+                entry_port=_OPPOSITE_PORT[switch_output],
+                exit_port=switch_output,
             ),
         )
     if switch_output is not None:

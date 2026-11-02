@@ -274,8 +274,8 @@ def iter_placement_candidates(
     one.  Cells are ordered by ``(row, col)``; within a cell, shapes use the
     declared :class:`RailPieceKind` order and orientations use clockwise port
     order.  Topologically duplicate rotations are intentionally omitted:
-    straights use ``N`` and ``E``; switches enumerate four trunk directions
-    and their two perpendicular branches; crossings use ``N`` only.
+    straights use ``N`` and ``E``; switches enumerate four branch directions
+    and two opposite main-line selections; crossings use ``N`` only.
     """
     if max_rails is not None and max_rails < 0:
         raise ValueError("max_rails must be non-negative or None")

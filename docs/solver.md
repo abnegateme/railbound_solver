@@ -66,11 +66,11 @@ rejects every rail orientation with a port facing outside the grid.
 The rear port beneath an actor already standing at the edge is only a virtual
 initial entry and is exempt; the actor's first movement must point in bounds.
 Interactive formalization exposes the observed straight, curved, and
-three-port switch rails. A switch candidate has one perpendicular trunk and
-two mutually opposite outputs. Both outputs merge onto the trunk; entry from
-the trunk takes the selected output. The generic topology model retains
-four-way crossings for future explicit level inventories, not as an implicit
-interactive default.
+three-port switch rails. A switch candidate has one perpendicular branch and
+two mutually opposite main-line ports. The branch connects bidirectionally to
+the selected port, while the other port merges one-way into it. The generic
+topology model retains four-way crossings for future explicit level
+inventories, not as an implicit interactive default.
 
 The interactive session enables the M10 search policy automatically. It uses
 forced buildable cells, optimistic port-connectivity pruning, canonical rail
@@ -85,7 +85,7 @@ The baseline enumerator searches zero rails, then one rail, then successively
 larger placements up to the level inventory. It orders cells by `(row, col)`,
 piece kinds as `straight`, `curve`, `switch`, `crossing`, and orientations
 clockwise. Equivalent rotations are omitted: straights use `N` and `E`;
-switches use four trunk directions and two opposite outputs; crossings
+switches use four branch directions and two opposite selections; crossings
 use `N`. Per-cell variants that point beyond the grid are omitted.
 Consequently the first solution has the fewest rails and is stable between
 runs.

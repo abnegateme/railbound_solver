@@ -51,8 +51,8 @@ A placement is invalid when any of its ports faces beyond the finite grid.
 The supported `piece_kind` values are `straight`, `curve`, `switch`, and
 `crossing`. `orientation` is one of `N`, `E`, `S`, or `W`; it rotates the
 canonical north-facing definition clockwise. For a switch, `orientation`
-instead names its perpendicular trunk and the required `switch_output` selects
-one of the two mutually opposite output ports.
+instead names its perpendicular branch and the required `switch_output`
+selects one of the two mutually opposite main-line ports.
 
 | Kind | Canonical internal transitions |
 | --- | --- |
@@ -67,11 +67,11 @@ such as `N` and `S` straights; solver canonicalisation is a later concern.
 `rail_piece_transitions(kind, orientation, switch_output)` exposes the
 definitions directly; `switch_output` is omitted for other piece kinds.
 
-A placeable switch has eight canonical variants: four trunk directions times
-two opposite outputs. A train entering the trunk exits through
-`switch_output`; a train entering either output merges onto the trunk. For
-example, a north-trunk switch has `N`, `E`, and `W` ports and selects either
-`E` or `W`. It is therefore runtime routing, not an undirected static
+A placeable switch has eight canonical variants: four perpendicular branch
+directions times two opposite main-line selections. If `X` is selected and
+`Y` is the other main-line port, routing is `branch ↔ X` plus the one-way
+merge `Y → X`; `X → Y` is unavailable. The selected state is fixed when a
+base rail is placed. It is therefore runtime routing, not an undirected static
 transition. The compiled piece exposes its three ports while the corresponding
 immutable `Switch` definition supplies movement semantics.
 

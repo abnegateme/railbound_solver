@@ -54,8 +54,10 @@ only when necessary, the target goal for each train. The resulting validated
 `Level` remains in memory and immediately opens as a schematic in the third
 workspace, **Level / solution**; it has no separate text editor.
 The current observed interactive inventory permits straight, curved, and
-three-port switch rails. Each switch candidate chooses one of four trunk
-directions and one of its two mutually opposite outputs. The abstract
+three-port switch rails. Each switch candidate chooses one of four branch
+directions and one of its two mutually opposite outputs. That choice fixes a
+bidirectional branch-to-output route plus a one-way merge from the other
+output. The abstract
 four-way `crossing` type is not offered until that mechanic is observed
 explicitly.
 Recognizable new mechanics may be recorded without data loss, but they remain

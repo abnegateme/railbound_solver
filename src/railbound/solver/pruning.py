@@ -226,9 +226,10 @@ def _build_traversal_index(
     for switch in level.switches:
         ports = (switch.entry_port, *switch.output_ports)
         accepted[switch.cell] = set(ports)
-        exits[(switch.cell, switch.entry_port)] = switch.output_ports
-        for output in switch.output_ports:
-            exits[(switch.cell, output)] = (switch.entry_port,)
+        for entry_port in ports:
+            exits[(switch.cell, entry_port)] = tuple(
+                exit_port for exit_port in ports if exit_port is not entry_port
+            )
 
     endpoints_by_pair: dict[str, list[TunnelEndpoint]] = {}
     for endpoint in level.tunnel_endpoints:
