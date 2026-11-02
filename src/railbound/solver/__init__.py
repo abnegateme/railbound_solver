@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import StrEnum
-from itertools import combinations
 from time import perf_counter
 from typing import Protocol
 
@@ -28,7 +27,7 @@ from railbound.solver.pruning import (
     arrivals_are_reachable,
     forced_placement_cells,
     minimum_required_rails,
-    selected_cells_are_reachable,
+    reachable_build_frontier,
 )
 from railbound.topology import (
     PlacedRail,
@@ -97,7 +96,7 @@ class SolverOptions:
 
     @classmethod
     def baseline(cls) -> SolverOptions:
-        """Return the unoptimized M9 search configuration."""
+        """Return frontier search without optional pruning or caching."""
         return cls(
             connectivity_pruning=False,
             forced_placements=False,
@@ -268,30 +267,25 @@ class _ReplaySummary:
 def iter_placement_candidates(
     level: Level, *, max_rails: int | None = None
 ) -> Iterator[RailPlacement]:
-    """Yield each legal placement in canonical iterative-deepening order.
+    """Yield connected placements in canonical iterative-deepening order.
 
     Candidates start with the empty placement and then increase rail count by
-    one.  Cells are ordered by ``(row, col)``; within a cell, shapes use the
-    declared :class:`RailPieceKind` order and orientations use clockwise port
-    order.  Topologically duplicate rotations are intentionally omitted:
-    straights use ``N`` and ``E``; switches enumerate four branch directions
-    and two opposite main-line selections; crossings use ``N`` only.
+    one.  Every added rail must continue the port frontier reachable from an
+    actor start.  Shapes use the declared :class:`RailPieceKind` order and
+    clockwise orientations; topologically duplicate rotations are omitted.
     """
     if max_rails is not None and max_rails < 0:
         raise ValueError("max_rails must be non-negative or None")
 
     cells = tuple(sorted(level.buildable_cells, key=_cell_key))
-    rail_capable_cells = level.rail_capable_cells
     kind_limits = _kind_limits(level)
     capacity = _placement_capacity(level, cells=cells, kind_limits=kind_limits)
     if max_rails is not None:
         capacity = min(capacity, max_rails)
 
     for rail_count in range(capacity + 1):
-        yield from _placements_with_rail_count(
-            level_id=level.id,
-            cells=cells,
-            rail_capable_cells=rail_capable_cells,
+        yield from _connected_placements_with_rail_count(
+            level,
             rail_count=rail_count,
             kind_limits=kind_limits,
         )
@@ -411,7 +405,7 @@ def benchmark_search(
     level: Level,
     limits: SolverLimits | None = None,
 ) -> SearchBenchmark:
-    """Compare M9 baseline and M10 optimized search under the same limits."""
+    """Compare unpruned and optimized frontier search under the same limits."""
     active_limits = limits or SolverLimits()
     baseline = solve(level, active_limits, SolverOptions.baseline())
     optimized = solve(level, active_limits, SolverOptions())
@@ -482,10 +476,8 @@ def _iter_optimized_candidates(
     counters: _SearchCounters,
     progress_observer: SolverProgressObserver | None,
 ) -> Iterator[RailPlacement]:
-    """Yield candidates while reporting safely pruned partial branches."""
+    """Recursively extend the reachable rail frontier and report pruning."""
     cells = tuple(sorted(level.buildable_cells, key=_cell_key))
-    if options.heuristic_ordering:
-        cells = tuple(sorted(cells, key=lambda cell: _heuristic_cell_key(level, cell)))
     kind_limits = _kind_limits(level)
     capacity = _placement_capacity(level, cells=cells, kind_limits=kind_limits)
     if max_rails is not None:
@@ -494,116 +486,19 @@ def _iter_optimized_candidates(
     forced = forced_placement_cells(level) if options.forced_placements else frozenset()
     minimum_rails = minimum_required_rails(level) if options.forced_placements else 0
     counters.forced_cells = len(forced)
-    optional_cells = tuple(cell for cell in cells if cell not in forced)
-    forced_cells = tuple(cell for cell in cells if cell in forced)
 
     yield RailPlacement(level_id=level.id)
     for rail_count in range(max(1, minimum_rails), capacity + 1):
-        optional_count = rail_count - len(forced_cells)
-        if optional_count < 0 or optional_count > len(optional_cells):
-            continue
-        for optional_selection in combinations(optional_cells, optional_count):
-            selected = (*forced_cells, *optional_selection)
-            if options.connectivity_pruning and not selected_cells_are_reachable(level, selected):
-                counters.connectivity_branches_pruned += 1
-                _notify_progress(
-                    progress_observer,
-                    RailPlacement(level_id=level.id),
-                    CandidateOutcome.BRANCH_PRUNED,
-                    counters,
-                    open_cells=selected,
-                )
-                continue
-            ordered_selection = tuple(
-                sorted(selected, key=lambda cell: _assignment_cell_key(level, cell))
-            )
-            yield from _assign_piece_kinds(
-                level,
-                selected_cells=ordered_selection,
-                kind_limits=kind_limits,
-                connectivity_pruning=options.connectivity_pruning,
-                heuristic_ordering=options.heuristic_ordering,
-                counters=counters,
-                progress_observer=progress_observer,
-            )
-
-
-def _assign_piece_kinds(
-    level: Level,
-    *,
-    selected_cells: tuple[CellCoord, ...],
-    kind_limits: dict[RailPieceKind, int | None],
-    connectivity_pruning: bool,
-    heuristic_ordering: bool,
-    counters: _SearchCounters,
-    progress_observer: SolverProgressObserver | None,
-) -> Iterator[RailPlacement]:
-    """Assign rail topology to a fixed cell set with optimistic look-ahead."""
-    rails: list[PlacedRail] = []
-    used_by_kind: dict[RailPieceKind, int] = {}
-    rail_capable_cells = level.rail_capable_cells
-
-    def visit(cell_index: int) -> Iterator[RailPlacement]:
-        open_cells = selected_cells[cell_index:]
-        partial = RailPlacement(level_id=level.id, rails=tuple(rails))
-        if connectivity_pruning and not arrivals_are_reachable(
+        yield from _connected_placements_with_rail_count(
             level,
-            partial,
-            open_cells=open_cells,
-        ):
-            counters.connectivity_branches_pruned += 1
-            _notify_progress(
-                progress_observer,
-                partial,
-                CandidateOutcome.BRANCH_PRUNED,
-                counters,
-                open_cells=open_cells,
-            )
-            return
-        if cell_index == len(selected_cells):
-            yield RailPlacement(
-                level_id=level.id,
-                rails=tuple(sorted(rails, key=lambda rail: _cell_key(rail.cell))),
-            )
-            return
-
-        cell = selected_cells[cell_index]
-        options = tuple(
-            option
-            for option in _rail_options(kind_limits)
-            if _rail_option_fits_level(
-                cell,
-                option,
-                rail_capable_cells=rail_capable_cells,
-            )
+            rail_count=rail_count,
+            kind_limits=kind_limits,
+            forced_cells=forced,
+            connectivity_pruning=options.connectivity_pruning,
+            heuristic_ordering=options.heuristic_ordering,
+            counters=counters,
+            progress_observer=progress_observer,
         )
-        if heuristic_ordering:
-            options = tuple(
-                sorted(
-                    options,
-                    key=lambda option: _piece_option_key(level, cell, option),
-                )
-            )
-        for piece_kind, orientation, switch_output in options:
-            limit = kind_limits[piece_kind]
-            if limit is not None and used_by_kind.get(piece_kind, 0) >= limit:
-                continue
-            rails.append(
-                PlacedRail(
-                    cell=cell,
-                    piece_kind=piece_kind,
-                    orientation=orientation,
-                    switch_output=switch_output,
-                )
-            )
-            used_by_kind[piece_kind] = used_by_kind.get(piece_kind, 0) + 1
-            yield from visit(cell_index + 1)
-            used_by_kind[piece_kind] -= 1
-            if used_by_kind[piece_kind] == 0:
-                del used_by_kind[piece_kind]
-            rails.pop()
-
-    yield from visit(0)
 
 
 def _rail_options(
@@ -636,12 +531,7 @@ def _rail_option_fits_level(
     rail_capable_cells: frozenset[CellCoord],
 ) -> bool:
     """Reject a rail shape with any port facing outside usable rail cells."""
-    piece_kind, orientation, switch_output = option
-    ports = {
-        port
-        for transition in rail_piece_transitions(piece_kind, orientation, switch_output)
-        for port in (transition.entry_port, transition.exit_port)
-    }
+    ports = _rail_option_ports(option)
     return all(
         CellCoord(
             row=cell.row + _PORT_OFFSETS[port][0],
@@ -649,6 +539,16 @@ def _rail_option_fits_level(
         )
         in rail_capable_cells
         for port in ports
+    )
+
+
+def _rail_option_ports(option: _RailOption) -> frozenset[Port]:
+    """Return every cell-edge port exposed by one rail option."""
+    piece_kind, orientation, switch_output = option
+    return frozenset(
+        port
+        for transition in rail_piece_transitions(piece_kind, orientation, switch_output)
+        for port in (transition.entry_port, transition.exit_port)
     )
 
 
@@ -663,41 +563,6 @@ def _heuristic_cell_key(level: Level, cell: CellCoord) -> tuple[int, int, int, i
     ]
     distance_from_actor = min(_manhattan(actor.cell, cell) for actor in level.actors)
     return min(scores, default=0), distance_from_actor, cell.row, cell.col
-
-
-def _assignment_cell_key(level: Level, cell: CellCoord) -> tuple[int, int, int, int, int]:
-    """Assign actor starts and goals before less constrained cells."""
-    actor_cells = {actor.cell for actor in level.actors}
-    goal_cells = {requirement.target_cell for requirement in level.win_condition.required_arrivals}
-    priority = 0 if cell in actor_cells else 1 if cell in goal_cells else 2
-    return priority, *_heuristic_cell_key(level, cell)
-
-
-def _piece_option_key(
-    level: Level,
-    cell: CellCoord,
-    option: _RailOption,
-) -> tuple[int, int, int, int]:
-    """Prefer a shape containing ports demanded at an actor or exact goal."""
-    piece_kind, orientation, switch_output = option
-    ports = {
-        port
-        for transition in rail_piece_transitions(piece_kind, orientation, switch_output)
-        for port in (transition.entry_port, transition.exit_port)
-    }
-    demanded = {
-        _opposite_port(Port(actor.direction)) for actor in level.actors if actor.cell == cell
-    }
-    demanded.update(
-        requirement.entry_port
-        for requirement in level.win_condition.required_arrivals
-        if requirement.target_cell == cell and requirement.entry_port is not None
-    )
-    matches = len(ports & demanded)
-    kind_rank = _PIECE_KINDS.index(piece_kind)
-    orientation_rank = _ORIENTATIONS[piece_kind].index(orientation)
-    output_rank = _switch_output_options(piece_kind, orientation).index(switch_output)
-    return -matches, kind_rank, orientation_rank, output_rank
 
 
 def _manhattan(first: CellCoord, second: CellCoord) -> int:
@@ -785,29 +650,89 @@ def _runtime_state_key(state: SimulationState) -> tuple[object, ...]:
     )
 
 
-def _placements_with_rail_count(
+def _connected_placements_with_rail_count(
+    level: Level,
     *,
-    level_id: str,
-    cells: tuple[CellCoord, ...],
-    rail_capable_cells: frozenset[CellCoord],
     rail_count: int,
     kind_limits: dict[RailPieceKind, int | None],
+    forced_cells: frozenset[CellCoord] = frozenset(),
+    connectivity_pruning: bool = False,
+    heuristic_ordering: bool = False,
+    counters: _SearchCounters | None = None,
+    progress_observer: SolverProgressObserver | None = None,
 ) -> Iterator[RailPlacement]:
-    """Enumerate exactly ``rail_count`` rails with ascending cell indices."""
+    """Recursively build exactly ``rail_count`` rails from actor frontiers."""
     rails: list[PlacedRail] = []
     used_by_kind: dict[RailPieceKind, int] = {}
+    seen: set[tuple[tuple[int, int, str, str, str], ...]] = set()
+    buildable_cells = frozenset(level.buildable_cells)
+    rail_capable_cells = level.rail_capable_cells
+    all_options = _rail_options(kind_limits)
 
-    def visit(first_cell_index: int) -> Iterator[RailPlacement]:
+    def visit() -> Iterator[RailPlacement]:
+        ordered_rails = tuple(sorted(rails, key=lambda rail: _cell_key(rail.cell)))
+        signature = tuple(
+            (
+                rail.cell.row,
+                rail.cell.col,
+                rail.piece_kind.value,
+                rail.orientation.value,
+                rail.switch_output.value if rail.switch_output is not None else "",
+            )
+            for rail in ordered_rails
+        )
+        if signature in seen:
+            return
+        seen.add(signature)
+
+        partial = RailPlacement(level_id=level.id, rails=ordered_rails)
         remaining = rail_count - len(rails)
+        occupied = frozenset(rail.cell for rail in rails)
+        missing_forced = forced_cells - occupied
+        unoccupied = buildable_cells - occupied
+        frontier = reachable_build_frontier(level, partial) if remaining else ()
+        frontier_cells = tuple(dict.fromkeys(cell for cell, _port in frontier))
+
+        if len(missing_forced) > remaining:
+            _report_pruned_branch(partial, frontier_cells)
+            return
+        open_cells = unoccupied if remaining else frozenset()
+        if connectivity_pruning and not arrivals_are_reachable(
+            level,
+            partial,
+            open_cells=open_cells,
+        ):
+            _report_pruned_branch(partial, frontier_cells)
+            return
         if remaining == 0:
-            yield RailPlacement(level_id=level_id, rails=tuple(rails))
+            yield partial
+            return
+        if not frontier:
+            _report_pruned_branch(partial, ())
             return
 
-        last_start = len(cells) - remaining + 1
-        for cell_index in range(first_cell_index, last_start):
-            cell = cells[cell_index]
-            for piece_kind, orientation, switch_output in _rail_options(kind_limits):
-                option = (piece_kind, orientation, switch_output)
+        entries_by_cell: dict[CellCoord, set[Port]] = {}
+        for cell, entry_port in frontier:
+            entries_by_cell.setdefault(cell, set()).add(entry_port)
+        frontier_order = tuple(entries_by_cell)
+        if heuristic_ordering:
+            frontier_order = tuple(
+                sorted(
+                    frontier_order,
+                    key=lambda cell: (
+                        int(cell not in missing_forced),
+                        *_heuristic_cell_key(level, cell),
+                    ),
+                )
+            )
+
+        extended = False
+        for cell in frontier_order:
+            entry_ports = entries_by_cell[cell]
+            for option in all_options:
+                piece_kind, orientation, switch_output = option
+                if not (_rail_option_ports(option) & entry_ports):
+                    continue
                 if not _rail_option_fits_level(
                     cell,
                     option,
@@ -817,6 +742,7 @@ def _placements_with_rail_count(
                 limit = kind_limits.get(piece_kind)
                 if limit is not None and used_by_kind.get(piece_kind, 0) >= limit:
                     continue
+                extended = True
                 rails.append(
                     PlacedRail(
                         cell=cell,
@@ -826,13 +752,30 @@ def _placements_with_rail_count(
                     )
                 )
                 used_by_kind[piece_kind] = used_by_kind.get(piece_kind, 0) + 1
-                yield from visit(cell_index + 1)
+                yield from visit()
                 used_by_kind[piece_kind] -= 1
                 if used_by_kind[piece_kind] == 0:
                     del used_by_kind[piece_kind]
                 rails.pop()
+        if not extended:
+            _report_pruned_branch(partial, frontier_cells)
 
-    yield from visit(0)
+    def _report_pruned_branch(
+        partial: RailPlacement,
+        frontier_cells: tuple[CellCoord, ...],
+    ) -> None:
+        if counters is None:
+            return
+        counters.connectivity_branches_pruned += 1
+        _notify_progress(
+            progress_observer,
+            partial,
+            CandidateOutcome.BRANCH_PRUNED,
+            counters,
+            open_cells=frontier_cells,
+        )
+
+    yield from visit()
 
 
 def _kind_limits(level: Level) -> dict[RailPieceKind, int | None]:

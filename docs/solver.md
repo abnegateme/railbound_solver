@@ -74,29 +74,39 @@ the selected port, while the other port merges one-way into it. The generic
 topology model retains four-way crossings for future explicit level
 inventories, not as an implicit interactive default.
 
-The interactive session enables the M10 search policy automatically. It uses
-forced buildable cells, optimistic port-connectivity pruning, canonical rail
-rotations, deterministic heuristic ordering, and a per-placement runtime-state
-cache. These optimizations can only discard candidates that cannot succeed;
-every reported solution is still replayed by the simulator. The GUI reports
-replay, pruning, cache, and elapsed-time totals in the activity log.
+The search constructs placements recursively from the actor starts. At every
+step it follows the currently reachable port graph and may add a rail only at
+an unoccupied buildable frontier cell through a compatible entry port. It
+never selects disconnected cell sets for later rejection. Partial placements
+reached through different construction orders share one canonical signature.
+This restriction preserves every minimum solution: each rail used by a replay
+is reachable from a start before its first traversal, while a disconnected
+unused rail can be removed to produce a smaller equivalent placement.
+
+The interactive session additionally uses forced buildable cells, optimistic
+port-connectivity pruning, canonical rail rotations, deterministic heuristic
+ordering, and a per-placement runtime-state cache. These optimizations can
+only discard candidates that cannot succeed; every reported solution is still
+replayed by the simulator. The GUI reports replay, pruning, cache, and
+elapsed-time totals in the activity log.
 
 ## Deterministic candidate order
 
-The baseline enumerator searches zero rails, then one rail, then successively
-larger placements up to the level inventory. It orders cells by `(row, col)`,
-piece kinds as `straight`, `curve`, `switch`, `crossing`, and orientations
-clockwise. Equivalent rotations are omitted: straights use `N` and `E`;
-switches use four branch directions and two opposite selections; crossings
-use `N`. Per-cell variants that point beyond the grid are omitted.
-Consequently the first solution has the fewest rails and is stable between
-runs.
+The generator searches zero rails, then one rail, then successively larger
+connected placements up to the level inventory. At each recursive state it
+orders reachable frontier cells by `(row, col)`, piece kinds as `straight`,
+`curve`, `switch`, `crossing`, and orientations clockwise. Equivalent
+rotations are omitted: straights use `N` and `E`; switches use four branch
+directions and two opposite selections; crossings use `N`. Per-cell variants
+that point beyond the grid or into an obstacle are omitted. Consequently the
+first solution has the fewest rails and search order is stable between runs.
 
 `SolverLimits.max_placements` bounds complete candidates considered,
 `SolverLimits.max_rails` bounds placement size, and `SolverLimits.max_ticks`
 bounds each replay. For measurements or regressions,
-`SolverOptions.baseline()` restores the M9 enumeration and replay policy;
-custom conservative predicates can be supplied through
+`SolverOptions.baseline()` disables optional pruning, heuristic ordering, and
+runtime caching while retaining constructive frontier generation. Custom
+conservative predicates can be supplied through
 `SolverOptions.pruning_predicates`.
 
 `benchmark_search(level, limits)` runs the baseline and optimized policies

@@ -108,6 +108,52 @@ def arrivals_are_reachable(
     )
 
 
+def reachable_build_frontier(
+    level: Level,
+    placement: RailPlacement,
+) -> tuple[tuple[CellCoord, Port], ...]:
+    """Return unoccupied buildable entries reachable from actor starts.
+
+    Existing switches are traversed optimistically, as in reachability
+    pruning.  The returned frontier may therefore contain extra branches, but
+    it cannot omit a rail used by a valid replay.
+    """
+    index = _build_traversal_index(level, placement, frozenset())
+    occupied = frozenset(rail.cell for rail in placement.rails)
+    buildable = frozenset(level.buildable_cells) - occupied
+    queue = deque((actor.cell, _OPPOSITE_PORT[Port(actor.direction)]) for actor in level.actors)
+    visited = set(queue)
+    frontier: set[tuple[CellCoord, Port]] = set()
+    while queue:
+        state = queue.popleft()
+        tunnel_exit = index.tunnels.get(state)
+        if tunnel_exit is not None:
+            boundary_targets = (_boundary_target(level, *tunnel_exit),)
+        else:
+            cell, entry_port = state
+            boundary_targets = tuple(
+                _boundary_target(level, cell, exit_port)
+                for exit_port in index.exits.get((cell, entry_port), ())
+            )
+        for target in boundary_targets:
+            if target is None:
+                continue
+            target_cell, target_entry = target
+            if target_entry in index.accepted_ports.get(target_cell, frozenset()):
+                successor = (target_cell, target_entry)
+                if successor not in visited:
+                    visited.add(successor)
+                    queue.append(successor)
+            elif target_cell in buildable:
+                frontier.add(target)
+    return tuple(
+        sorted(
+            frontier,
+            key=lambda item: (item[0].row, item[0].col, _PORTS.index(item[1])),
+        )
+    )
+
+
 def forced_placement_cells(level: Level) -> frozenset[CellCoord]:
     """Return buildable cells that every coarse actor-to-goal route needs.
 
@@ -142,30 +188,6 @@ def forced_placement_cells(level: Level) -> frozenset[CellCoord]:
             if not _cell_path_exists(start, target, neighbours, blocked=cell):
                 required.add(cell)
     return frozenset(required)
-
-
-def selected_cells_are_reachable(
-    level: Level,
-    selected_cells: Iterable[CellCoord],
-) -> bool:
-    """Cheaply reject a chosen cell set before assigning rail shapes."""
-    selected = frozenset(selected_cells)
-    existing = {
-        *(track.cell for track in level.fixed_tracks),
-        *(switch.cell for switch in level.switches),
-        *(endpoint.cell for endpoint in level.tunnel_endpoints),
-    }
-    nodes = frozenset((*selected, *existing))
-    neighbours = _cell_neighbours(level, nodes)
-    actors = {actor.id: actor for actor in level.actors}
-    return all(
-        _cell_path_exists(
-            actors[requirement.actor_id].cell,
-            requirement.target_cell,
-            neighbours,
-        )
-        for requirement in level.win_condition.required_arrivals
-    )
 
 
 def minimum_required_rails(level: Level) -> int:
@@ -307,13 +329,26 @@ def _cross_boundary(
     exit_port: Port,
     index: _TraversalIndex,
 ) -> tuple[CellCoord, Port] | None:
+    target = _boundary_target(level, cell, exit_port)
+    if target is None:
+        return None
+    target_cell, entry_port = target
+    if entry_port not in index.accepted_ports.get(target_cell, frozenset()):
+        return None
+    return target
+
+
+def _boundary_target(
+    level: Level,
+    cell: CellCoord,
+    exit_port: Port,
+) -> tuple[CellCoord, Port] | None:
+    """Return the adjacent cell entry without requiring existing topology."""
     row_delta, col_delta = _PORT_OFFSETS[exit_port]
     target_cell = CellCoord(row=cell.row + row_delta, col=cell.col + col_delta)
     if not level.is_in_bounds(target_cell):
         return None
     entry_port = _OPPOSITE_PORT[exit_port]
-    if entry_port not in index.accepted_ports.get(target_cell, frozenset()):
-        return None
     return target_cell, entry_port
 
 
@@ -394,4 +429,5 @@ __all__ = [
     "arrivals_are_reachable",
     "forced_placement_cells",
     "minimum_required_rails",
+    "reachable_build_frontier",
 ]
