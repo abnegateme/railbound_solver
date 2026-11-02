@@ -229,6 +229,12 @@ _SWITCH_OUTPUTS: dict[Port, tuple[Port, Port]] = {
     Port.SOUTH: (Port.WEST, Port.EAST),
     Port.WEST: (Port.NORTH, Port.SOUTH),
 }
+_PORT_OFFSETS: dict[Port, tuple[int, int]] = {
+    Port.NORTH: (-1, 0),
+    Port.EAST: (0, 1),
+    Port.SOUTH: (1, 0),
+    Port.WEST: (0, -1),
+}
 type _RailOption = tuple[RailPieceKind, Port, Port | None]
 
 
@@ -283,6 +289,8 @@ def iter_placement_candidates(
     for rail_count in range(capacity + 1):
         yield from _placements_with_rail_count(
             level_id=level.id,
+            rows=level.rows,
+            cols=level.cols,
             cells=cells,
             rail_count=rail_count,
             kind_limits=kind_limits,
@@ -559,7 +567,16 @@ def _assign_piece_kinds(
             return
 
         cell = selected_cells[cell_index]
-        options = _rail_options(kind_limits)
+        options = tuple(
+            option
+            for option in _rail_options(kind_limits)
+            if _rail_option_fits_grid(
+                cell,
+                option,
+                rows=level.rows,
+                cols=level.cols,
+            )
+        )
         if heuristic_ordering:
             options = tuple(
                 sorted(
@@ -610,6 +627,27 @@ def _switch_output_options(
     if piece_kind is RailPieceKind.SWITCH:
         return _SWITCH_OUTPUTS[orientation]
     return (None,)
+
+
+def _rail_option_fits_grid(
+    cell: CellCoord,
+    option: _RailOption,
+    *,
+    rows: int,
+    cols: int,
+) -> bool:
+    """Reject a rail shape with any port facing beyond the finite board."""
+    piece_kind, orientation, switch_output = option
+    ports = {
+        port
+        for transition in rail_piece_transitions(piece_kind, orientation, switch_output)
+        for port in (transition.entry_port, transition.exit_port)
+    }
+    return all(
+        0 <= cell.row + _PORT_OFFSETS[port][0] < rows
+        and 0 <= cell.col + _PORT_OFFSETS[port][1] < cols
+        for port in ports
+    )
 
 
 def _heuristic_cell_key(level: Level, cell: CellCoord) -> tuple[int, int, int, int]:
@@ -748,6 +786,8 @@ def _runtime_state_key(state: SimulationState) -> tuple[object, ...]:
 def _placements_with_rail_count(
     *,
     level_id: str,
+    rows: int,
+    cols: int,
     cells: tuple[CellCoord, ...],
     rail_count: int,
     kind_limits: dict[RailPieceKind, int | None],
@@ -766,6 +806,14 @@ def _placements_with_rail_count(
         for cell_index in range(first_cell_index, last_start):
             cell = cells[cell_index]
             for piece_kind, orientation, switch_output in _rail_options(kind_limits):
+                option = (piece_kind, orientation, switch_output)
+                if not _rail_option_fits_grid(
+                    cell,
+                    option,
+                    rows=rows,
+                    cols=cols,
+                ):
+                    continue
                 limit = kind_limits.get(piece_kind)
                 if limit is not None and used_by_kind.get(piece_kind, 0) >= limit:
                     continue

@@ -66,6 +66,10 @@ A button cannot open a gate for the same tick. Buttons toggle; an unchannelled
 switch stays at `initial_output`. Arrived actors no longer move or collide.
 Rails hold no persistent occupancy state: actors may reuse the same transition
 on later ticks, while simultaneous entry into one cell remains a collision.
+Actor starts are fixed aligned straights and arrival cells are fixed oriented
+terminals, so neither can be replaced by a switch. A transition must leave
+through a different port from the one used to enter; an actor therefore cannot
+reverse back into the cell it occupied on the previous tick.
 
 ## Events and failures
 

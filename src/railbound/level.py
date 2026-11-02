@@ -91,7 +91,11 @@ class TrackTransition(_FrozenModel):
 
 
 class TrackPiece(_FrozenModel):
-    """A fixed semantic rail piece and its explicit internal transitions."""
+    """A fixed semantic rail piece and its explicit internal transitions.
+
+    A one-port piece is a terminal such as an oriented arrival cell.  It
+    accepts entry through that port but has no onward transition.
+    """
 
     id: Identifier
     cell: CellCoord
@@ -101,11 +105,15 @@ class TrackPiece(_FrozenModel):
 
     @model_validator(mode="after")
     def valid_topology(self) -> Self:
-        """Require every declared port to belong to exactly one transition."""
-        if len(self.ports) < 2:
-            raise ValueError("a track piece must declare at least two ports")
+        """Validate a terminal or pair every through-track port exactly once."""
+        if not self.ports:
+            raise ValueError("a track piece must declare at least one port")
         if len(set(self.ports)) != len(self.ports):
             raise ValueError("track piece ports must be unique")
+        if len(self.ports) == 1:
+            if self.transitions:
+                raise ValueError("a terminal track piece cannot declare transitions")
+            return self
         if not self.transitions:
             raise ValueError("a track piece must declare at least one transition")
 
@@ -303,6 +311,36 @@ class Level(_FrozenModel):
             "win_condition.required_arrivals",
             lambda value: value.target_cell,
         )
+        actor_rear_ports = {
+            (_cell_key(actor.cell), _opposite_port(Port(actor.direction.value)))
+            for actor in self.actors
+        }
+        for track in self.fixed_tracks:
+            for port in track.ports:
+                if (_cell_key(track.cell), port) in actor_rear_ports:
+                    continue
+                self._validate_inward_port(track.cell, port, f"fixed track {track.id!r}")
+        for switch in self.switches:
+            for port in (switch.entry_port, *switch.output_ports):
+                self._validate_inward_port(switch.cell, port, f"switch {switch.id!r}")
+        for endpoint in self.tunnel_endpoints:
+            self._validate_inward_port(
+                endpoint.cell,
+                endpoint.entry_port,
+                f"tunnel endpoint {endpoint.id!r}",
+            )
+            self._validate_inward_port(
+                endpoint.cell,
+                endpoint.exit_port,
+                f"tunnel endpoint {endpoint.id!r}",
+            )
+        for arrival in self.win_condition.required_arrivals:
+            if arrival.entry_port is not None:
+                self._validate_inward_port(
+                    arrival.target_cell,
+                    arrival.entry_port,
+                    f"arrival for actor {arrival.actor_id!r}",
+                )
 
         fixed_track_cells = _cell_keys(track.cell for track in self.fixed_tracks)
         buildable_cells = _cell_keys(self.buildable_cells)
@@ -310,6 +348,7 @@ class Level(_FrozenModel):
             raise ValueError("buildable_cells cannot contain a fixed track")
         if any(not track.fixed for track in self.fixed_tracks):
             raise ValueError("fixed_tracks must contain only fixed track pieces")
+        self._validate_fixed_actor_and_arrival_tracks()
 
         entity_ids = [
             *[track.id for track in self.fixed_tracks],
@@ -359,6 +398,20 @@ class Level(_FrozenModel):
             row, col = duplicates[0]
             raise ValueError(f"{name} contains duplicate cell ({row}, {col})")
 
+    def _validate_inward_port(self, cell: CellCoord, port: Port, name: str) -> None:
+        """Reject a rail/device port that faces beyond the finite grid."""
+        row_delta, col_delta = {
+            Port.NORTH: (-1, 0),
+            Port.EAST: (0, 1),
+            Port.SOUTH: (1, 0),
+            Port.WEST: (0, -1),
+        }[port]
+        neighbour = CellCoord(row=cell.row + row_delta, col=cell.col + col_delta)
+        if not self.is_in_bounds(neighbour):
+            raise ValueError(
+                f"{name} at ({cell.row}, {cell.col}) points outside the grid through {port.value}"
+            )
+
     def _validate_win_condition_references(self, actor_ids: set[str]) -> None:
         referenced_actor_ids = [
             *[arrival.actor_id for arrival in self.win_condition.required_arrivals],
@@ -374,6 +427,37 @@ class Level(_FrozenModel):
             raise ValueError(
                 "win_condition references unknown actor IDs: " + ", ".join(unknown_actor_ids)
             )
+
+    def _validate_fixed_actor_and_arrival_tracks(self) -> None:
+        """Keep train starts and arrival cells out of placement search."""
+        tracks_by_cell = {_cell_key(track.cell): track for track in self.fixed_tracks}
+        switch_cells = _cell_keys(switch.cell for switch in self.switches)
+        for actor in self.actors:
+            key = _cell_key(actor.cell)
+            if key in switch_cells:
+                raise ValueError(f"actor {actor.id!r} cannot start on a switch")
+            track = tracks_by_cell.get(key)
+            direction = Port(actor.direction.value)
+            expected_ports = {direction, _opposite_port(direction)}
+            if track is None or set(track.ports) != expected_ports or len(track.transitions) != 1:
+                raise ValueError(
+                    f"actor {actor.id!r} requires a fixed straight track aligned with its direction"
+                )
+
+        for arrival in self.win_condition.required_arrivals:
+            key = _cell_key(arrival.target_cell)
+            if key in switch_cells:
+                raise ValueError(f"arrival for actor {arrival.actor_id!r} cannot target a switch")
+            track = tracks_by_cell.get(key)
+            if (
+                arrival.entry_port is None
+                or track is None
+                or track.ports != (arrival.entry_port,)
+                or track.transitions
+            ):
+                raise ValueError(
+                    f"arrival for actor {arrival.actor_id!r} requires a fixed terminal track"
+                )
 
     def _validate_tunnel_pairs(self) -> None:
         endpoints_by_pair: defaultdict[str, list[TunnelEndpoint]] = defaultdict(list)
@@ -412,3 +496,12 @@ def _cell_key(cell: CellCoord) -> tuple[int, int]:
 def _cell_keys(cells: Iterable[CellCoord]) -> set[tuple[int, int]]:
     """Return coordinate keys for an iterable of cells without exposing mutability."""
     return {_cell_key(cell) for cell in cells}
+
+
+def _opposite_port(port: Port) -> Port:
+    return {
+        Port.NORTH: Port.SOUTH,
+        Port.EAST: Port.WEST,
+        Port.SOUTH: Port.NORTH,
+        Port.WEST: Port.EAST,
+    }[port]

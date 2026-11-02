@@ -239,16 +239,23 @@ def built_in_cell_types() -> tuple[CellTypeDefinition, ...]:
                 ),
             ),
             features=(
-                TerrainFeature(terrain_kind="terrain.empty", buildable=True),
+                TerrainFeature(terrain_kind="terrain.empty", buildable=False),
                 ActorFeature(arrival_order_property="arrival_order"),
             ),
         ),
         CellTypeDefinition(
             id="goal.arrival",
             display_name="Arrival",
+            properties=(
+                CellPropertyDefinition(
+                    id="entry_port",
+                    label="Arrival direction",
+                    value_kind="direction",
+                ),
+            ),
             features=(
-                TerrainFeature(terrain_kind="terrain.empty", buildable=True),
-                GoalFeature(),
+                TerrainFeature(terrain_kind="terrain.empty", buildable=False),
+                GoalFeature(entry_port_property="entry_port"),
             ),
         ),
     )
@@ -269,7 +276,7 @@ def cell_type_for_role(
         properties = ()
     elif role == "train":
         features = (
-            TerrainFeature(terrain_kind="terrain.empty", buildable=True),
+            TerrainFeature(terrain_kind="terrain.empty", buildable=False),
             ActorFeature(arrival_order_property="arrival_order"),
         )
         properties = (
@@ -284,10 +291,16 @@ def cell_type_for_role(
         )
     elif role == "goal":
         features = (
-            TerrainFeature(terrain_kind="terrain.empty", buildable=True),
-            GoalFeature(),
+            TerrainFeature(terrain_kind="terrain.empty", buildable=False),
+            GoalFeature(entry_port_property="entry_port"),
         )
-        properties = ()
+        properties = (
+            CellPropertyDefinition(
+                id="entry_port",
+                label="Arrival direction",
+                value_kind="direction",
+            ),
+        )
     else:
         features = (UnmodeledFeature(description="Awaiting a graph-state feature definition"),)
         properties = ()
@@ -395,11 +408,14 @@ def formalize_annotations(
     fixed_tracks: list[TrackPiece] = []
     actors: list[Actor] = []
     arrival_orders: dict[str, int] = {}
-    goals: dict[CellCoord, Port | None] = {}
+    goals: dict[CellCoord, Port] = {}
     for annotation in annotations:
         if annotation.type_id is None:
             raise AssertionError("validated annotation must have a type")
         definition = definitions[annotation.type_id]
+        has_explicit_topology = any(
+            isinstance(feature, TopologyFeature) for feature in definition.features
+        )
         for feature in definition.features:
             if isinstance(feature, TerrainFeature):
                 terrain.append(TerrainCell(cell=annotation.cell, kind=feature.terrain_kind))
@@ -419,6 +435,31 @@ def formalize_annotations(
                 direction = annotation.properties[feature.direction_property]
                 if not isinstance(direction, str):
                     raise ValueError(f"actor {annotation.id!r} has no direction")
+                actor_direction = Direction(direction)
+                direction_port = Port(actor_direction.value)
+                entry_port = _opposite_port(direction_port)
+                if not has_explicit_topology:
+                    _require_in_bounds_ports(
+                        annotation.cell,
+                        (direction_port,),
+                        rows=rows,
+                        cols=cols,
+                        description="train departure",
+                    )
+                    fixed_tracks.append(
+                        TrackPiece(
+                            id=f"{annotation.id}:track",
+                            cell=annotation.cell,
+                            ports=(entry_port, direction_port),
+                            transitions=(
+                                TrackTransition(
+                                    entry_port=entry_port,
+                                    exit_port=direction_port,
+                                ),
+                            ),
+                            fixed=True,
+                        )
+                    )
                 number = (
                     annotation.properties.get(feature.number_property)
                     if feature.number_property is not None
@@ -433,7 +474,7 @@ def formalize_annotations(
                     Actor(
                         id=annotation.id,
                         cell=annotation.cell,
-                        direction=Direction(direction),
+                        direction=actor_direction,
                         actor_type=feature.actor_type,
                         number=number if isinstance(number, int) else None,
                         color=color if isinstance(color, str) else None,
@@ -456,8 +497,37 @@ def formalize_annotations(
                 if feature.entry_port_property is not None:
                     value = annotation.properties[feature.entry_port_property]
                     if not isinstance(value, str):
-                        raise ValueError(f"goal {annotation.id!r} has no entry port")
-                    entry_port = Port(value)
+                        raise ValueError(f"goal {annotation.id!r} has no orientation")
+                    property_definition = next(
+                        item
+                        for item in definition.properties
+                        if item.id == feature.entry_port_property
+                    )
+                    observed_port = Port(value)
+                    entry_port = (
+                        _opposite_port(observed_port)
+                        if property_definition.value_kind == "direction"
+                        else observed_port
+                    )
+                if entry_port is None:
+                    raise ValueError(f"goal {annotation.id!r} requires an orientation")
+                if not has_explicit_topology:
+                    _require_in_bounds_ports(
+                        annotation.cell,
+                        (entry_port,),
+                        rows=rows,
+                        cols=cols,
+                        description="goal track",
+                    )
+                    fixed_tracks.append(
+                        TrackPiece(
+                            id=f"{annotation.id}:track",
+                            cell=annotation.cell,
+                            ports=(entry_port,),
+                            transitions=(),
+                            fixed=True,
+                        )
+                    )
                 goals[annotation.cell] = entry_port
 
     if not actors:
@@ -615,10 +685,46 @@ def _require_port_property(
     property_id: str,
     feature_kind: str,
 ) -> None:
+    definition = properties[property_id]
+    if definition.value_kind == "direction":
+        return
     definition = _require_property_kind(properties, property_id, "text", feature_kind)
     allowed = tuple(port.value for port in Port)
     if definition.choices != allowed:
         raise ValueError(f"{feature_kind} port property choices must be {allowed!r}")
+
+
+def _opposite_port(port: Port) -> Port:
+    return {
+        Port.NORTH: Port.SOUTH,
+        Port.EAST: Port.WEST,
+        Port.SOUTH: Port.NORTH,
+        Port.WEST: Port.EAST,
+    }[port]
+
+
+def _require_in_bounds_ports(
+    cell: CellCoord,
+    ports: tuple[Port, ...],
+    *,
+    rows: int,
+    cols: int,
+    description: str,
+) -> None:
+    offsets = {
+        Port.NORTH: (-1, 0),
+        Port.EAST: (0, 1),
+        Port.SOUTH: (1, 0),
+        Port.WEST: (0, -1),
+    }
+    for port in ports:
+        row_delta, col_delta = offsets[port]
+        neighbour_row = cell.row + row_delta
+        neighbour_col = cell.col + col_delta
+        if not (0 <= neighbour_row < rows and 0 <= neighbour_col < cols):
+            raise ValueError(
+                f"{description} at ({cell.row}, {cell.col}) points outside the grid through {port.value}"
+            )
 
 
 def _valid_property_value(value: PropertyValue, definition: CellPropertyDefinition) -> bool:

@@ -495,7 +495,7 @@ def _movement_intent(
         return _through_tunnel(actor, starting_tunnel, board, gate_statuses)
 
     exit_port = _internal_exit_port(actor.cell, entry_port, board, switch_outputs)
-    if exit_port is None:
+    if exit_port is None or exit_port == entry_port:
         return SimulationFailure(
             reason=FailureReason.DERAILMENT,
             actor_ids=(actor.actor_id,),

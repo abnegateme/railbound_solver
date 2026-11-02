@@ -59,6 +59,12 @@ One placement is shared by every actor, so replay accepts sequential rail reuse.
 Simultaneous same-cell and head-on conflicts remain collisions regardless of
 the cell's internal topology. Optional `arrival_order` is part of the
 authoritative replay state and therefore filters solver results.
+Actor starts and arrival targets are fixed oriented topology rather than
+placement cells: starts use an aligned straight and targets use a one-port
+terminal. They may be visited again on a later tick. Candidate generation
+rejects every rail orientation with a port facing outside the grid.
+The rear port beneath an actor already standing at the edge is only a virtual
+initial entry and is exempt; the actor's first movement must point in bounds.
 Interactive formalization exposes the observed straight, curved, and
 three-port switch rails. A switch candidate has one perpendicular trunk and
 two mutually opposite outputs. Both outputs merge onto the trunk; entry from
@@ -80,8 +86,9 @@ larger placements up to the level inventory. It orders cells by `(row, col)`,
 piece kinds as `straight`, `curve`, `switch`, `crossing`, and orientations
 clockwise. Equivalent rotations are omitted: straights use `N` and `E`;
 switches use four trunk directions and two opposite outputs; crossings
-use `N`. Consequently the first solution has the fewest rails and is stable
-between runs.
+use `N`. Per-cell variants that point beyond the grid are omitted.
+Consequently the first solution has the fewest rails and is stable between
+runs.
 
 `SolverLimits.max_placements` bounds complete candidates considered,
 `SolverLimits.max_rails` bounds placement size, and `SolverLimits.max_ticks`

@@ -37,7 +37,7 @@ save_level(level, Path("output/level.json"))
 | `metadata` | Optional human-readable `title`, `world`, and `source`. |
 | `terrain` | Optional descriptive terrain labels; these do not imply simulator behavior yet. |
 | `buildable_cells` | Cells in which a future `RailPlacement` may propose a rail. |
-| `fixed_tracks` | Immutable track pieces, specified by ports and internal transitions. |
+| `fixed_tracks` | Immutable track pieces, specified by ports and internal transitions; one-port pieces are terminals. |
 | `actors` | Required initial actors, with position, travel direction, type, and optional number/color. |
 | `switches`, `buttons`, `gates`, `tunnel_endpoints` | Optional device layers with observed M7 runtime behavior. |
 | `rail_inventory` | A non-negative `total_budget`, per-`piece_kind` counts, or both. |
@@ -59,6 +59,18 @@ transitions that mention undeclared ports. `fixed_tracks` must have `fixed` set
 to `true`. Placeable rails live in the separate M5 `RailPlacement` document,
 which can be paired with this level without changing its authoritative
 fixed-object data. See [`board-topology.md`](board-topology.md).
+
+Every actor cell contains a fixed straight aligned with the actor direction.
+Every arrival target contains a fixed one-port terminal matching its required
+`entry_port`. Neither kind of cell is buildable or may contain a switch, but
+its fixed topology may be entered again on a later tick. Ports on fixed tracks,
+switches, tunnels, and arrival requirements must face another in-bounds cell;
+the level cannot describe track beyond the grid. The sole exception is the
+rear orientation port beneath a starting actor: it is a virtual origin for a
+car already standing on that rail, not a constructed connection outside the
+board. The actor's forward direction must still lead to an in-bounds cell.
+In interactive annotation the goal field stores the wagon's arrival direction;
+formalization converts it to the opposite cell-edge `entry_port`.
 
 ## Cross-object validation
 

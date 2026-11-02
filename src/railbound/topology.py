@@ -283,6 +283,24 @@ def validate_placement(level: Level, placement: RailPlacement) -> None:
         row, col = invalid_cells[0]
         raise ValueError(f"rail placement cell ({row}, {col}) is not buildable")
 
+    outward_ports = sorted(
+        (
+            rail.cell.row,
+            rail.cell.col,
+            port.value,
+        )
+        for rail in placement.rails
+        for port in _placed_rail_ports(rail)
+        if not _is_in_bounds(
+            _neighbouring_port(PortNode(rail.cell, port)).cell,
+            rows=level.rows,
+            cols=level.cols,
+        )
+    )
+    if outward_ports:
+        row, col, port = outward_ports[0]
+        raise ValueError(f"rail placement at ({row}, {col}) points outside the grid through {port}")
+
     rail_count = len(placement.rails)
     if (
         level.rail_inventory.total_budget is not None
@@ -414,24 +432,32 @@ def _compile_placed_rail(rail: PlacedRail) -> CompiledPiece:
         rail.switch_output,
     )
     transitions = () if rail.piece_kind is RailPieceKind.SWITCH else possible_transitions
-    ports = tuple(
-        sorted(
-            {
-                port
-                for transition in possible_transitions
-                for port in (transition.entry_port, transition.exit_port)
-            },
-            key=_PORT_RANK.__getitem__,
-        )
-    )
     return CompiledPiece(
         cell=rail.cell,
-        ports=ports,
+        ports=_placed_rail_ports(rail),
         transitions=transitions,
         source="placement",
         piece_kind=rail.piece_kind,
         orientation=rail.orientation,
         switch_output=rail.switch_output,
+    )
+
+
+def _placed_rail_ports(rail: PlacedRail) -> tuple[Port, ...]:
+    """Return every boundary port used by one validated placed rail."""
+    return tuple(
+        sorted(
+            {
+                port
+                for transition in rail_piece_transitions(
+                    rail.piece_kind,
+                    rail.orientation,
+                    rail.switch_output,
+                )
+                for port in (transition.entry_port, transition.exit_port)
+            },
+            key=_PORT_RANK.__getitem__,
+        )
     )
 
 

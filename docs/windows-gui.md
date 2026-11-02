@@ -42,7 +42,10 @@ reviewed manually, and red cards still need a decision. Choose a known type or
 create a reusable type directly on a card. Type-specific fields appear only
 when needed. A train has a direction and an optional positive **Arrival order**;
 filled order values must be unique and become the relative order in which those
-trains must reach their goals. A completed manual decision is stored as
+trains must reach their goals. An arrival cell requires its fixed **Arrival
+direction**: this is the wagon's direction of travel, so its actual entry port
+is on the opposite side. Train and arrival cells are fixed topology and cannot
+receive a placed rail or switch. A completed manual decision is stored as
 recognition evidence; crops and review files do not need to be exported.
 
 **Formalize level** becomes available only when every cell has a complete type
