@@ -41,14 +41,17 @@ write the document. A placement may be empty, but it cannot list the same cell
 twice. Its `level_id` must match the `Level.id` passed to
 `validate_placement(level, placement)` or `compile_board(level, placement)`.
 
-Each rail must be on one of the level's `buildable_cells`. The level's
-`total_budget`, when present, limits all rails. A non-empty `piece_counts`
-list both limits the named kinds and excludes unnamed kinds from the placement.
+Each rail must be on one of the level's `buildable_cells`, so the board itself
+always provides the finite upper bound of one rail per buildable cell. The
+level's `total_budget`, when present, adds an explicit upper limit. A non-empty
+`piece_counts` list both limits the named kinds and excludes unnamed kinds from
+the placement.
 A placement is invalid when any of its ports faces beyond the finite grid.
 Cells omitted from `buildable_cells`, including obstacles, cannot receive a
 rail; without separate fixed topology they are absent from the compiled port
 graph and cannot be crossed by a route. A placed rail is also invalid when one
-of its ports points into such a blocked cell.
+of its ports points into such a blocked cell or into a side that an adjacent
+fixed track does not expose.
 
 ## Static rail definitions
 

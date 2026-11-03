@@ -19,6 +19,7 @@ from railbound.level import (
     Port,
     RailInventory,
     RailPieceCount,
+    Switch,
     TerrainCell,
     TrackPiece,
     TrackTransition,
@@ -83,6 +84,22 @@ class TopologyFeature(_FrozenModel):
         return self
 
 
+class FixedTrackFeature(_FrozenModel):
+    """A fixed two-port rail whose sides are annotation properties."""
+
+    kind: Literal["fixed_track"] = "fixed_track"
+    first_port_property: Identifier = "first_port"
+    second_port_property: Identifier = "second_port"
+
+
+class FixedSwitchFeature(_FrozenModel):
+    """A fixed three-port switch whose current route is annotation state."""
+
+    kind: Literal["fixed_switch"] = "fixed_switch"
+    branch_port_property: Identifier = "branch_port"
+    selected_output_property: Identifier = "selected_output"
+
+
 class ActorFeature(_FrozenModel):
     kind: Literal["actor"] = "actor"
     actor_type: Identifier = "train"
@@ -143,6 +160,8 @@ class UnmodeledFeature(_FrozenModel):
 CellFeature = Annotated[
     TerrainFeature
     | TopologyFeature
+    | FixedTrackFeature
+    | FixedSwitchFeature
     | ActorFeature
     | GoalFeature
     | StateFeature
@@ -185,7 +204,14 @@ class CellTypeDefinition(_FrozenModel):
     @property
     def formalization_supported(self) -> bool:
         """Return whether every feature has a current Level compiler handler."""
-        supported = (TerrainFeature, TopologyFeature, ActorFeature, GoalFeature)
+        supported = (
+            TerrainFeature,
+            TopologyFeature,
+            FixedTrackFeature,
+            FixedSwitchFeature,
+            ActorFeature,
+            GoalFeature,
+        )
         return all(isinstance(feature, supported) for feature in self.features)
 
 
@@ -224,6 +250,46 @@ def built_in_cell_types() -> tuple[CellTypeDefinition, ...]:
             id="terrain.occupied",
             display_name="Obstacle",
             features=(TerrainFeature(terrain_kind="terrain.occupied", buildable=False),),
+        ),
+        CellTypeDefinition(
+            id="track.fixed.two-port",
+            display_name="Fixed rail · 2 ports",
+            properties=(
+                CellPropertyDefinition(
+                    id="first_port",
+                    label="Side A",
+                    value_kind="direction",
+                ),
+                CellPropertyDefinition(
+                    id="second_port",
+                    label="Side B",
+                    value_kind="direction",
+                ),
+            ),
+            features=(
+                TerrainFeature(terrain_kind="terrain.empty", buildable=False),
+                FixedTrackFeature(),
+            ),
+        ),
+        CellTypeDefinition(
+            id="track.fixed.three-port",
+            display_name="Fixed switch · 3 ports",
+            properties=(
+                CellPropertyDefinition(
+                    id="branch_port",
+                    label="Side branch",
+                    value_kind="direction",
+                ),
+                CellPropertyDefinition(
+                    id="selected_output",
+                    label="Selected output",
+                    value_kind="direction",
+                ),
+            ),
+            features=(
+                TerrainFeature(terrain_kind="terrain.empty", buildable=False),
+                FixedSwitchFeature(),
+            ),
         ),
         CellTypeDefinition(
             id="actor.train",
@@ -333,6 +399,23 @@ def annotation_errors(
         return tuple(errors)
     if not definition.formalization_supported:
         errors.append("the selected type has no complete graph-state compiler yet")
+    for feature in definition.features:
+        if isinstance(feature, FixedTrackFeature):
+            first = annotation.properties.get(feature.first_port_property)
+            second = annotation.properties.get(feature.second_port_property)
+            if first is not None and first == second:
+                errors.append("the two-port rail sides must be distinct")
+        elif isinstance(feature, FixedSwitchFeature):
+            branch = annotation.properties.get(feature.branch_port_property)
+            output = annotation.properties.get(feature.selected_output_property)
+            if (
+                isinstance(branch, str)
+                and isinstance(output, str)
+                and branch in {port.value for port in Port}
+                and output in {port.value for port in Port}
+                and Port(output) not in _perpendicular_ports(Port(branch))
+            ):
+                errors.append("the switch output must be perpendicular to its side branch")
     return tuple(errors)
 
 
@@ -406,6 +489,7 @@ def formalize_annotations(
     terrain: list[TerrainCell] = []
     buildable_cells: list[CellCoord] = []
     fixed_tracks: list[TrackPiece] = []
+    switches: list[Switch] = []
     actors: list[Actor] = []
     arrival_orders: dict[str, int] = {}
     goals: dict[CellCoord, Port] = {}
@@ -414,7 +498,8 @@ def formalize_annotations(
             raise AssertionError("validated annotation must have a type")
         definition = definitions[annotation.type_id]
         has_explicit_topology = any(
-            isinstance(feature, TopologyFeature) for feature in definition.features
+            isinstance(feature, (TopologyFeature, FixedTrackFeature))
+            for feature in definition.features
         )
         for feature in definition.features:
             if isinstance(feature, TerrainFeature):
@@ -429,6 +514,45 @@ def formalize_annotations(
                         ports=feature.ports,
                         transitions=feature.transitions,
                         fixed=feature.fixed,
+                    )
+                )
+            elif isinstance(feature, FixedTrackFeature):
+                first = Port(str(annotation.properties[feature.first_port_property]))
+                second = Port(str(annotation.properties[feature.second_port_property]))
+                _require_in_bounds_ports(
+                    annotation.cell,
+                    (first, second),
+                    rows=rows,
+                    cols=cols,
+                    description="fixed two-port rail",
+                )
+                fixed_tracks.append(
+                    TrackPiece(
+                        id=annotation.id,
+                        cell=annotation.cell,
+                        ports=(first, second),
+                        transitions=(TrackTransition(entry_port=first, exit_port=second),),
+                        fixed=True,
+                    )
+                )
+            elif isinstance(feature, FixedSwitchFeature):
+                branch = Port(str(annotation.properties[feature.branch_port_property]))
+                selected_output = Port(str(annotation.properties[feature.selected_output_property]))
+                other_output = _opposite_port(selected_output)
+                _require_in_bounds_ports(
+                    annotation.cell,
+                    (branch, selected_output, other_output),
+                    rows=rows,
+                    cols=cols,
+                    description="fixed three-port switch",
+                )
+                switches.append(
+                    Switch(
+                        id=annotation.id,
+                        cell=annotation.cell,
+                        entry_port=branch,
+                        output_ports=(selected_output, other_output),
+                        initial_output=selected_output,
                     )
                 )
             elif isinstance(feature, ActorFeature):
@@ -579,6 +703,7 @@ def formalize_annotations(
         ),
         fixed_tracks=tuple(fixed_tracks),
         actors=tuple(actors),
+        switches=tuple(switches),
         rail_inventory=RailInventory(
             total_budget=rail_budget,
             piece_counts=(
@@ -601,6 +726,10 @@ def make_level_id(level_number: str) -> str:
 
 
 def _feature_property_references(feature: CellFeature) -> set[str]:
+    if isinstance(feature, FixedTrackFeature):
+        return {feature.first_port_property, feature.second_port_property}
+    if isinstance(feature, FixedSwitchFeature):
+        return {feature.branch_port_property, feature.selected_output_property}
     if isinstance(feature, ActorFeature):
         return {
             value
@@ -635,7 +764,13 @@ def _validate_feature_property_kinds(
     feature: CellFeature,
     properties: Mapping[str, CellPropertyDefinition],
 ) -> None:
-    if isinstance(feature, ActorFeature):
+    if isinstance(feature, FixedTrackFeature):
+        _require_port_property(properties, feature.first_port_property, feature.kind)
+        _require_port_property(properties, feature.second_port_property, feature.kind)
+    elif isinstance(feature, FixedSwitchFeature):
+        _require_port_property(properties, feature.branch_port_property, feature.kind)
+        _require_port_property(properties, feature.selected_output_property, feature.kind)
+    elif isinstance(feature, ActorFeature):
         _require_property_kind(properties, feature.direction_property, "direction", feature.kind)
         if feature.number_property is not None:
             _require_property_kind(properties, feature.number_property, "integer", feature.kind)
@@ -701,6 +836,13 @@ def _opposite_port(port: Port) -> Port:
         Port.SOUTH: Port.NORTH,
         Port.WEST: Port.EAST,
     }[port]
+
+
+def _perpendicular_ports(port: Port) -> frozenset[Port]:
+    """Return the two cardinal ports perpendicular to ``port``."""
+    if port in (Port.NORTH, Port.SOUTH):
+        return frozenset((Port.EAST, Port.WEST))
+    return frozenset((Port.NORTH, Port.SOUTH))
 
 
 def _require_in_bounds_ports(

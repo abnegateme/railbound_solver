@@ -47,12 +47,19 @@ direction**: this is the wagon's direction of travel, so its actual entry port
 is on the opposite side. Train and arrival cells are fixed topology and cannot
 receive a placed rail or switch. A completed manual decision is stored as
 recognition evidence; crops and review files do not need to be exported.
+The built-in **Fixed rail · 2 ports** type accepts any two distinct sides, so
+it covers both straight rails and curves. **Fixed switch · 3 ports** records
+the perpendicular side branch and the currently selected longitudinal output;
+the other longitudinal side is inferred automatically. Both types are
+immutable, excluded from the gameplay rail budget, and added to existing local
+annotation stores when the GUI starts.
 
 **Formalize level** becomes available only when every cell has a complete type
-whose graph-state compiler is implemented. It asks for the rail budget and,
-only when necessary, the target goal for each train. The resulting validated
+whose graph-state compiler is implemented. It asks for the gameplay rail
+budget and, only when necessary, for the target goal of each train. The
+resulting validated
 `Level` remains in memory and immediately opens as a schematic in the third
-workspace, **Level / solution**; it has no separate text editor.
+workspace, **Level / solutions**; it has no separate text editor.
 The current observed interactive inventory permits straight, curved, and
 three-port switch rails. Each switch candidate chooses one of four branch
 directions and one of its two mutually opposite outputs. That choice fixes a
@@ -64,15 +71,16 @@ Recognizable new mechanics may be recorded without data loss, but they remain
 visibly blocked from formalization until their topology/state compiler exists;
 they are never silently ignored.
 
-**Solve level** is on the same **Workflow** tab. During search, the third
-workspace redraws sampled states from the actual search tree: assigned rails,
-outlined cells still awaiting a piece assignment, complete failures, and the
-verified solution. This includes partial branches rejected before they become
-complete placements. The GUI plays a bounded sample queue at a visible rate,
-so fast searches still animate without making large searches take minutes.
-Search runs in a worker thread; images are delivered back to Qt through queued
-signals, so the window remains responsive. Search statistics and the replay
-trace go to the activity log; the placement can be saved beside the button.
+**Solve level** is on the same **Workflow** tab. It searches the full finite
+space of legal connected placements within the level's rail budget and
+visualizes only verified solutions.
+Each solution appears as soon as it is found. Arrow buttons in the third
+workspace select earlier or later solutions, and **Stop** ends the search while
+retaining all discoveries. Search runs in a worker thread and the window stays
+responsive. The status shows the current candidate number and found-solution
+count; an exact total is not precomputed because doing so would duplicate the
+recursive search. Search statistics go to the activity log, and the currently
+selected placement can be saved beside the solve button.
 The optional **Placement** tab can inspect or replay a `placement.json`, and a
 successful replay uses the same visual workspace. Pruning, bounds, and runtime
 caching use the interactive defaults and add no extra controls.

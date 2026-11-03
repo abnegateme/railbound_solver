@@ -44,6 +44,7 @@ class SolverStatus(StrEnum):
     SOLVED = "solved"
     UNSOLVABLE = "unsolvable"
     LIMIT_REACHED = "limit_reached"
+    STOPPED = "stopped"
 
 
 class CandidateOutcome(StrEnum):
@@ -141,11 +142,21 @@ SolverStatistics = SearchStats
 
 
 @dataclass(frozen=True, slots=True)
-class SolverResult:
-    """The placement and replay that ended a deterministic search.
+class SolverSolution:
+    """One simulator-verified solution discovered during a search."""
 
-    An unsolved result has no placement or simulation trace because no
-    candidate was verified as successful.  The counters still describe every
+    placement: RailPlacement
+    simulation: SimulationResult
+    trace: tuple[SimulationEvent, ...]
+    placements_considered: int
+
+
+@dataclass(frozen=True, slots=True)
+class SolverResult:
+    """Verified solutions and counters from one deterministic search.
+
+    The legacy singular fields contain the first verified solution. An
+    unsolved result leaves them empty, while the counters still describe every
     attempted candidate.
     """
 
@@ -154,11 +165,12 @@ class SolverResult:
     simulation: SimulationResult | None
     trace: tuple[SimulationEvent, ...]
     statistics: SearchStats
+    solutions: tuple[SolverSolution, ...] = ()
 
     @property
     def solved(self) -> bool:
         """Return whether this result contains a simulator-verified solution."""
-        return self.status is SolverStatus.SOLVED
+        return self.placement is not None
 
     @property
     def succeeded(self) -> bool:
@@ -187,6 +199,18 @@ class SolverProgressObserver(Protocol):
     """Receive deterministic candidate updates without influencing search order."""
 
     def __call__(self, progress: SolverProgress, /) -> None: ...
+
+
+class SolverSolutionObserver(Protocol):
+    """Receive each verified solution without influencing search order."""
+
+    def __call__(self, solution: SolverSolution, /) -> None: ...
+
+
+class SolverStopPredicate(Protocol):
+    """Return whether an exhaustive search should stop cooperatively."""
+
+    def __call__(self) -> bool: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -296,16 +320,18 @@ def solve(
     limits: SolverLimits | None = None,
     options: SolverOptions | None = None,
     progress_observer: SolverProgressObserver | None = None,
+    solution_observer: SolverSolutionObserver | None = None,
+    stop_requested: SolverStopPredicate | None = None,
+    *,
+    find_all: bool = False,
 ) -> SolverResult:
-    """Find the first simulator-verified placement within ``limits``.
+    """Find simulator-verified placements within ``limits``.
 
-    Search remains iterative by rail count, so the first solution always uses
-    the fewest rails.  Pruning uses optimistic reachability and can therefore
-    remove only impossible branches.  Dynamic runtime states are never merged
-    across placements; the per-placement cache stops only exact deterministic
-    cycles. ``progress_observer`` receives pruned partial branches and each
-    complete candidate after it is pruned or replayed; it cannot alter
-    deterministic search ordering.
+    By default the first solution is returned for backward compatibility.
+    ``find_all=True`` continues until the finite placement space is exhausted
+    or ``stop_requested`` returns true. ``solution_observer`` receives every
+    verified solution immediately. Search remains iterative by rail count, so
+    solutions are ordered by rail count and then canonical candidate order.
     """
     active_limits = limits or SolverLimits()
     active_options = options or SolverOptions()
@@ -317,6 +343,7 @@ def solve(
     )
     placement_limit = active_limits.max_placements
     counters = _SearchCounters()
+    solutions: list[SolverSolution] = []
     predicates = active_options.pruning_predicates
     connectivity_pruner = ConnectivityPruner()
     forced_pruner = ForcedPlacementPruner.for_level(level)
@@ -332,6 +359,7 @@ def solve(
             options=active_options,
             counters=counters,
             progress_observer=progress_observer,
+            stop_requested=stop_requested,
         )
     else:
         candidates = iter_placement_candidates(level, max_rails=active_limits.max_rails)
@@ -344,11 +372,19 @@ def solve(
         )
 
     for placement in candidates:
+        if _should_stop(stop_requested):
+            return _result(
+                status=SolverStatus.STOPPED,
+                counters=counters,
+                started_at=started_at,
+                solutions=solutions,
+            )
         if placement_limit is not None and counters.placements_considered >= placement_limit:
             return _result(
                 status=SolverStatus.LIMIT_REACHED,
                 counters=counters,
                 started_at=started_at,
+                solutions=solutions,
             )
 
         counters.placements_considered += 1
@@ -382,22 +418,42 @@ def solve(
         counters.transposition_hits += replay.transposition_hits
         if replay.simulation is not None and replay.simulation.succeeded:
             _notify_progress(progress_observer, placement, CandidateOutcome.SUCCEEDED, counters)
-            return SolverResult(
-                status=SolverStatus.SOLVED,
+            solution = SolverSolution(
                 placement=placement,
                 simulation=replay.simulation,
                 trace=replay.simulation.events,
-                statistics=_statistics(counters, started_at),
+                placements_considered=counters.placements_considered,
             )
+            solutions.append(solution)
+            if solution_observer is not None:
+                solution_observer(solution)
+            if not find_all:
+                return _result(
+                    status=SolverStatus.SOLVED,
+                    counters=counters,
+                    started_at=started_at,
+                    solutions=solutions,
+                )
+            continue
         _notify_progress(progress_observer, placement, CandidateOutcome.FAILED, counters)
 
-    status = SolverStatus.UNSOLVABLE
-    if active_limits.max_rails is not None and active_limits.max_rails < natural_capacity:
+    if _should_stop(stop_requested):
+        status = SolverStatus.STOPPED
+    elif solutions:
+        status = SolverStatus.SOLVED
+    else:
+        status = SolverStatus.UNSOLVABLE
+    if (
+        status is not SolverStatus.STOPPED
+        and active_limits.max_rails is not None
+        and active_limits.max_rails < natural_capacity
+    ):
         status = SolverStatus.LIMIT_REACHED
     return _result(
         status=status,
         counters=counters,
         started_at=started_at,
+        solutions=solutions,
     )
 
 
@@ -417,15 +473,24 @@ def _result(
     status: SolverStatus,
     counters: _SearchCounters,
     started_at: float,
+    solutions: list[SolverSolution] | tuple[SolverSolution, ...] = (),
 ) -> SolverResult:
-    """Create an unsolved result with consistently named empty outputs."""
+    """Create a result and retain the first solution in legacy fields."""
+    frozen_solutions = tuple(solutions)
+    first = frozen_solutions[0] if frozen_solutions else None
     return SolverResult(
         status=status,
-        placement=None,
-        simulation=None,
-        trace=(),
+        placement=None if first is None else first.placement,
+        simulation=None if first is None else first.simulation,
+        trace=() if first is None else first.trace,
         statistics=_statistics(counters, started_at),
+        solutions=frozen_solutions,
     )
+
+
+def _should_stop(predicate: SolverStopPredicate | None) -> bool:
+    """Read a cooperative stop request without coupling search to threading."""
+    return predicate is not None and predicate()
 
 
 def _statistics(counters: _SearchCounters, started_at: float) -> SearchStats:
@@ -475,6 +540,7 @@ def _iter_optimized_candidates(
     options: SolverOptions,
     counters: _SearchCounters,
     progress_observer: SolverProgressObserver | None,
+    stop_requested: SolverStopPredicate | None = None,
 ) -> Iterator[RailPlacement]:
     """Recursively extend the reachable rail frontier and report pruning."""
     cells = tuple(sorted(level.buildable_cells, key=_cell_key))
@@ -489,6 +555,8 @@ def _iter_optimized_candidates(
 
     yield RailPlacement(level_id=level.id)
     for rail_count in range(max(1, minimum_rails), capacity + 1):
+        if _should_stop(stop_requested):
+            return
         yield from _connected_placements_with_rail_count(
             level,
             rail_count=rail_count,
@@ -498,6 +566,7 @@ def _iter_optimized_candidates(
             heuristic_ordering=options.heuristic_ordering,
             counters=counters,
             progress_observer=progress_observer,
+            stop_requested=stop_requested,
         )
 
 
@@ -529,17 +598,32 @@ def _rail_option_fits_level(
     option: _RailOption,
     *,
     rail_capable_cells: frozenset[CellCoord],
+    fixed_ports: dict[CellCoord, frozenset[Port]],
 ) -> bool:
-    """Reject a rail shape with any port facing outside usable rail cells."""
-    ports = _rail_option_ports(option)
-    return all(
-        CellCoord(
+    """Reject ports facing blocked cells or closed sides of fixed topology."""
+    for port in _rail_option_ports(option):
+        neighbour = CellCoord(
             row=cell.row + _PORT_OFFSETS[port][0],
             col=cell.col + _PORT_OFFSETS[port][1],
         )
-        in rail_capable_cells
-        for port in ports
-    )
+        if neighbour not in rail_capable_cells:
+            return False
+        accepted_ports = fixed_ports.get(neighbour)
+        if accepted_ports is not None and _opposite_port(port) not in accepted_ports:
+            return False
+    return True
+
+
+def _fixed_ports(level: Level) -> dict[CellCoord, frozenset[Port]]:
+    """Return the existing connectable sides of immutable board topology."""
+    ports: dict[CellCoord, set[Port]] = {}
+    for track in level.fixed_tracks:
+        ports.setdefault(track.cell, set()).update(track.ports)
+    for switch in level.switches:
+        ports.setdefault(switch.cell, set()).update((switch.entry_port, *switch.output_ports))
+    for endpoint in level.tunnel_endpoints:
+        ports.setdefault(endpoint.cell, set()).update((endpoint.entry_port, endpoint.exit_port))
+    return {cell: frozenset(cell_ports) for cell, cell_ports in ports.items()}
 
 
 def _rail_option_ports(option: _RailOption) -> frozenset[Port]:
@@ -660,6 +744,7 @@ def _connected_placements_with_rail_count(
     heuristic_ordering: bool = False,
     counters: _SearchCounters | None = None,
     progress_observer: SolverProgressObserver | None = None,
+    stop_requested: SolverStopPredicate | None = None,
 ) -> Iterator[RailPlacement]:
     """Recursively build exactly ``rail_count`` rails from actor frontiers."""
     rails: list[PlacedRail] = []
@@ -667,9 +752,12 @@ def _connected_placements_with_rail_count(
     seen: set[tuple[tuple[int, int, str, str, str], ...]] = set()
     buildable_cells = frozenset(level.buildable_cells)
     rail_capable_cells = level.rail_capable_cells
+    fixed_ports = _fixed_ports(level)
     all_options = _rail_options(kind_limits)
 
     def visit() -> Iterator[RailPlacement]:
+        if _should_stop(stop_requested):
+            return
         ordered_rails = tuple(sorted(rails, key=lambda rail: _cell_key(rail.cell)))
         signature = tuple(
             (
@@ -728,8 +816,12 @@ def _connected_placements_with_rail_count(
 
         extended = False
         for cell in frontier_order:
+            if _should_stop(stop_requested):
+                return
             entry_ports = entries_by_cell[cell]
             for option in all_options:
+                if _should_stop(stop_requested):
+                    return
                 piece_kind, orientation, switch_output = option
                 if not (_rail_option_ports(option) & entry_ports):
                     continue
@@ -737,6 +829,7 @@ def _connected_placements_with_rail_count(
                     cell,
                     option,
                     rail_capable_cells=rail_capable_cells,
+                    fixed_ports=fixed_ports,
                 ):
                     continue
                 limit = kind_limits.get(piece_kind)
@@ -829,7 +922,10 @@ __all__ = [
     "SolverProgress",
     "SolverProgressObserver",
     "SolverResult",
+    "SolverSolution",
+    "SolverSolutionObserver",
     "SolverStatistics",
+    "SolverStopPredicate",
     "SolverStatus",
     "benchmark_search",
     "iter_placement_candidates",

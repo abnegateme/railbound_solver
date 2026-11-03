@@ -1,8 +1,10 @@
-# Optimized solver (M10)
+# Exhaustive optimized solver
 
-`solve()` generates legal `RailPlacement` values and replays each one through
-the deterministic simulator. A placement is a solution only when that replay
-finishes with `SimulationStatus.SUCCESS`.
+`solve()` generates legal connected `RailPlacement` values and replays each
+one through the deterministic simulator. A placement is a solution only when
+that replay finishes with `SimulationStatus.SUCCESS`. The default API call
+still returns after the first solution; `find_all=True` exhausts the finite
+board search and returns every verified solution in `result.solutions`.
 
 ```python
 from pathlib import Path
@@ -38,23 +40,22 @@ The Windows-host `interactive` command opens the one primary session, rather
 than a separate solver window. The visual **Cells** workspace continues from
 the calibrated screenshot and in-memory crops. Once every cell is reviewed,
 **Formalize level** compiles the annotations into the validated in-memory
-`Level`. **Solve level** remains on the same **Workflow** tab and uses the
-interactive search bounds. Formalization opens the schematic **Level /
-solution** workspace; while solving, that workspace samples the real stream of
-partial branches, failed candidates, and successful placements. Assigned rails
-are drawn directly, while outlined cells show the unresolved remainder of a
-partial branch. The verified solution remains after playback.
-The search runs outside the Qt GUI thread and sends sampled progress through
-queued signals. A bounded GUI-side queue plays those samples at a visible pace,
-including when the search itself finishes faster than Qt can repaint. Statistics
-and the replay trace are appended to the activity log. The optional
+`Level` after asking for the level's available rail count. **Solve level**
+remains on the same **Workflow** tab and exhausts all legal connected
+placements within that gameplay budget unless the user presses **Stop**.
+Formalization opens the schematic **Level / solutions** workspace. Only
+simulator-verified solutions are visualized there, as soon as they are found;
+arrow buttons move through every solution retained so far. Statistics are
+appended to the activity log. The optional
 **Placement** tab can load or paste a manual `placement.json`, inspect its M5
 port graph, and replay it through M6–M7.
 
-The result includes the successful placement, its `SimulationResult`, the
-same ordered event trace in `result.trace`, and `SearchStats`. When no
-placement can be found, `placement`, `simulation`, and `trace` are empty and
-`status` distinguishes an exhaustive `unsolvable` search from `limit_reached`.
+Each item in `result.solutions` includes its placement, `SimulationResult`,
+event trace, and the candidate number at which it was found. Legacy
+`placement`, `simulation`, and `trace` fields retain the first solution. A
+stopped exhaustive search has status `stopped` and keeps all solutions found
+before the request. When no placement can be found, the solution fields are
+empty and status is `unsolvable`.
 One placement is shared by every actor, so replay accepts sequential rail reuse.
 Simultaneous same-cell and head-on conflicts remain collisions regardless of
 the cell's internal topology. Optional `arrival_order` is part of the
@@ -90,6 +91,25 @@ only discard candidates that cannot succeed; every reported solution is still
 replayed by the simulator. The GUI reports replay, pruning, cache, and
 elapsed-time totals in the activity log.
 
+## Current construction rules
+
+- The finite grid is a hard boundary; no rail port may point outside it.
+- A buildable cell holds at most one placed rail.
+- Rails connect only through matching north, east, south, and west ports of
+  adjacent cells.
+- Actors must reach their assigned goal cells in the declared arrival order.
+- Observed fixed rails cannot be changed. New rails may join only their
+  existing exposed ports.
+- Fixed two-port rails declare any two distinct sides. Fixed three-port rails
+  declare a perpendicular side branch and selected longitudinal output; the
+  opposite longitudinal side is inferred.
+- Actor starts use fixed aligned straight track; goal cells use fixed oriented
+  terminal track.
+- A three-port switch has two longitudinal ports and one perpendicular branch.
+  The branch and one selected longitudinal port form the selected route; the
+  other longitudinal port merges toward that output.
+- Obstacles are not buildable and no placed rail may expose a port toward one.
+
 ## Deterministic candidate order
 
 The generator searches zero rails, then one rail, then successively larger
@@ -101,9 +121,13 @@ directions and two opposite selections; crossings use `N`. Per-cell variants
 that point beyond the grid or into an obstacle are omitted. Consequently the
 first solution has the fewest rails and search order is stable between runs.
 
-`SolverLimits.max_placements` bounds complete candidates considered,
-`SolverLimits.max_rails` bounds placement size, and `SolverLimits.max_ticks`
-bounds each replay. For measurements or regressions,
+The interactive workflow does not set the search-only `max_placements` or
+`max_rails` overrides; the level's rail inventory still limits every legal
+placement as part of the game rules. These overrides remain available to
+bounded API and CLI callers, while `max_ticks` bounds each replay. The GUI can
+show the current candidate number, but not a precomputed exact total: obtaining
+the total with recursive connectivity pruning would require performing the
+same exhaustive traversal a second time. For measurements or regressions,
 `SolverOptions.baseline()` disables optional pruning, heuristic ordering, and
 runtime caching while retaining constructive frontier generation. Custom
 conservative predicates can be supplied through

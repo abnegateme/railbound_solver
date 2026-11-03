@@ -322,6 +322,35 @@ def validate_placement(level: Level, placement: RailPlacement) -> None:
             f"({target_row}, {target_col}) through {port}"
         )
 
+    fixed_ports: dict[CellCoord, set[Port]] = {}
+    for track in level.fixed_tracks:
+        fixed_ports.setdefault(track.cell, set()).update(track.ports)
+    for switch in level.switches:
+        fixed_ports.setdefault(switch.cell, set()).update((switch.entry_port, *switch.output_ports))
+    for endpoint in level.tunnel_endpoints:
+        fixed_ports.setdefault(endpoint.cell, set()).update(
+            (endpoint.entry_port, endpoint.exit_port)
+        )
+    closed_fixed_sides = sorted(
+        (
+            rail.cell.row,
+            rail.cell.col,
+            port.value,
+            neighbour.cell.row,
+            neighbour.cell.col,
+        )
+        for rail in placement.rails
+        for port in _placed_rail_ports(rail)
+        for neighbour in (_neighbouring_port(PortNode(rail.cell, port)),)
+        if neighbour.cell in fixed_ports and neighbour.port not in fixed_ports[neighbour.cell]
+    )
+    if closed_fixed_sides:
+        row, col, port, target_row, target_col = closed_fixed_sides[0]
+        raise ValueError(
+            f"rail placement at ({row}, {col}) points into a closed side of fixed track "
+            f"at ({target_row}, {target_col}) through {port}"
+        )
+
     rail_count = len(placement.rails)
     if (
         level.rail_inventory.total_budget is not None

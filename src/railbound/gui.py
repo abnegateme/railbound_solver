@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections import deque
 from math import floor, hypot
 from pathlib import Path
+from threading import Event
 from time import monotonic
 from typing import Literal, cast
 
 import cv2
-from PySide6.QtCore import QObject, QStandardPaths, QThread, QTimer, Qt, Signal, Slot
+from PySide6.QtCore import QObject, QStandardPaths, QThread, Qt, Signal, Slot
 from PySide6.QtGui import (
     QAction,
     QColor,
@@ -98,6 +98,7 @@ from railbound.solver import (
     SolverLimits,
     SolverProgress,
     SolverResult,
+    SolverSolution,
     SolverStatus,
     solve,
 )
@@ -115,13 +116,8 @@ _DEFAULT_ROWS = 8
 _DEFAULT_COLS = 10
 _DIMENSION_CONTROL_WIDTH = 72
 _INTERSECTION_SELECTION_MAX_AXIS_FRACTION = 0.4
-_INTERACTIVE_MAX_PLACEMENTS = 10_000
 _INTERACTIVE_MAX_TICKS = 10_000
-_SEARCH_PREVIEW_LIVE_INTERVAL_SECONDS = 0.05
-_SEARCH_PREVIEW_FRAME_INTERVAL_MS = 50
-_SEARCH_PREVIEW_INITIAL_STEPS = 20
-_SEARCH_PREVIEW_SEARCH_STEP = 500
-_SEARCH_PREVIEW_BUFFER_SIZE = 60
+_SEARCH_PROGRESS_INTERVAL_SECONDS = 0.1
 _INTERACTIVE_CROP_SPEC = CropSpec(
     output_size=96,
     core_fraction=0.8,
@@ -225,9 +221,10 @@ _POINT_LABELS = (
 
 
 class _SolverWorker(QObject):
-    """Run deterministic search off the GUI thread and emit sampled progress."""
+    """Run exhaustive deterministic search off the GUI thread."""
 
     progress = Signal(object)
+    solution_found = Signal(object)
     result_ready = Signal(object)
     failed = Signal(str)
     finished = Signal()
@@ -235,41 +232,39 @@ class _SolverWorker(QObject):
     def __init__(self, level: Level) -> None:
         super().__init__()
         self._level = level
+        self._stop_requested = Event()
+
+    def request_stop(self) -> None:
+        """Request cooperative termination from the GUI thread."""
+        self._stop_requested.set()
 
     @Slot()
     def run(self) -> None:
         last_preview_at = float("-inf")
-        last_preview_step = 0
-        last_progress: SolverProgress | None = None
-        last_emitted: SolverProgress | None = None
 
         def observe(progress: SolverProgress) -> None:
-            nonlocal last_preview_at, last_preview_step, last_progress, last_emitted
-            last_progress = progress
+            nonlocal last_preview_at
             now = monotonic()
             if (
                 progress.outcome is not CandidateOutcome.SUCCEEDED
-                and progress.search_steps > _SEARCH_PREVIEW_INITIAL_STEPS
-                and progress.search_steps - last_preview_step < _SEARCH_PREVIEW_SEARCH_STEP
-                and now - last_preview_at < _SEARCH_PREVIEW_LIVE_INTERVAL_SECONDS
+                and now - last_preview_at < _SEARCH_PROGRESS_INTERVAL_SECONDS
             ):
                 return
             self.progress.emit(progress)
-            last_emitted = progress
             last_preview_at = now
-            last_preview_step = progress.search_steps
+
+        def publish_solution(solution: SolverSolution) -> None:
+            self.solution_found.emit(solution)
 
         try:
             result = solve(
                 self._level,
-                SolverLimits(
-                    max_placements=_INTERACTIVE_MAX_PLACEMENTS,
-                    max_ticks=_INTERACTIVE_MAX_TICKS,
-                ),
+                SolverLimits(max_ticks=_INTERACTIVE_MAX_TICKS),
                 progress_observer=observe,
+                solution_observer=publish_solution,
+                stop_requested=self._stop_requested.is_set,
+                find_all=True,
             )
-            if last_progress is not None and last_progress != last_emitted:
-                self.progress.emit(last_progress)
             self.result_ready.emit(result)
         except Exception as error:
             self.failed.emit(f"{type(error).__name__}: {error}")
@@ -357,15 +352,13 @@ class CalibrationWindow(QMainWindow):
         self._placement: RailPlacement | None = None
         self._placement_path: Path | None = None
         self._solver_result: SolverResult | None = None
+        self._solver_solutions: list[SolverSolution] = []
+        self._solution_index = -1
         self._solution_output_path: Path | None = None
         self._solver_thread: QThread | None = None
         self._solver_worker: _SolverWorker | None = None
+        self._solver_stop_pending = False
         self._solving_level: Level | None = None
-        self._solver_previews: deque[SolverProgress] = deque(maxlen=_SEARCH_PREVIEW_BUFFER_SIZE)
-        self._pending_solver_result: SolverResult | None = None
-        self._solver_preview_timer = QTimer(self)
-        self._solver_preview_timer.setInterval(_SEARCH_PREVIEW_FRAME_INTERVAL_MS)
-        self._solver_preview_timer.timeout.connect(self._advance_solver_preview)
 
         self.setWindowTitle("Railbound Solver — Parse, review, and solve")
         self.resize(1240, 820)
@@ -537,10 +530,38 @@ class CalibrationWindow(QMainWindow):
         self._cell_editor.annotation_changed.connect(self._cell_annotation_changed)
         self._cell_editor.new_type_requested.connect(self._create_cell_type)
         self._level_canvas = CalibrationCanvas()
+        level_workspace = QWidget()
+        level_layout = QVBoxLayout(level_workspace)
+        level_layout.setContentsMargins(0, 0, 0, 0)
+        level_layout.setSpacing(6)
+        level_layout.addWidget(self._level_canvas, stretch=1)
+        solution_navigation = QHBoxLayout()
+        self._previous_solution_button = QToolButton()
+        self._previous_solution_button.setText("◀")
+        self._previous_solution_button.setToolTip("Previous solution")
+        self._previous_solution_button.clicked.connect(self._show_previous_solution)
+        self._solution_position = QLabel("No solutions yet")
+        self._next_solution_button = QToolButton()
+        self._next_solution_button.setText("▶")
+        self._next_solution_button.setToolTip("Next solution")
+        self._next_solution_button.clicked.connect(self._show_next_solution)
+        self._stop_solver_button = QPushButton("Stop")
+        self._stop_solver_button.setObjectName("secondaryAction")
+        self._stop_solver_button.setToolTip("Keep found solutions and stop the search")
+        self._stop_solver_button.clicked.connect(self._stop_solver)
+        solution_navigation.addStretch()
+        solution_navigation.addWidget(self._previous_solution_button)
+        solution_navigation.addWidget(self._solution_position)
+        solution_navigation.addWidget(self._next_solution_button)
+        solution_navigation.addSpacing(12)
+        solution_navigation.addWidget(self._stop_solver_button)
+        solution_navigation.addStretch()
+        level_layout.addLayout(solution_navigation)
+        self._update_solution_controls()
         self._workspace_tabs = QTabWidget()
         self._workspace_tabs.addTab(self._canvas, "Screenshot")
         self._cells_tab_index = self._workspace_tabs.addTab(self._cell_editor, "Cells")
-        self._level_tab_index = self._workspace_tabs.addTab(self._level_canvas, "Level / solution")
+        self._level_tab_index = self._workspace_tabs.addTab(level_workspace, "Level / solutions")
         self._workspace_tabs.setTabEnabled(self._cells_tab_index, False)
         self._workspace_tabs.setTabEnabled(self._level_tab_index, False)
         content_layout.addWidget(self._workspace_tabs, stretch=1)
@@ -613,7 +634,11 @@ class CalibrationWindow(QMainWindow):
         self._placement = None
         self._placement_path = None
         self._solver_result = None
+        self._solver_solutions.clear()
+        self._solution_index = -1
+        self._solver_stop_pending = False
         self._save_solution_button.setEnabled(False)
+        self._update_solution_controls()
         self._clear_level_view()
         self._placement_editor.clear()
         self._placement_inspection_output.clear()
@@ -774,18 +799,19 @@ class CalibrationWindow(QMainWindow):
         if self._solver_thread is not None or self._solving_level is not None:
             return
         self._solver_result = None
-        self._pending_solver_result = None
-        self._solver_previews.clear()
-        self._solver_preview_timer.stop()
+        self._solver_solutions.clear()
+        self._solution_index = -1
+        self._solver_stop_pending = False
         self._save_solution_button.setEnabled(False)
         self._show_formal_level()
-        self._solver_status.setText("Searching with automatic safe pruning…")
+        self._solver_status.setText("Searching all valid combinations…")
         self._solving_level = level
         thread = QThread(self)
         worker = _SolverWorker(level)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(self._solver_progressed)
+        worker.solution_found.connect(self._solver_solution_found)
         worker.result_ready.connect(self._solver_completed)
         worker.failed.connect(self._solver_failed)
         worker.finished.connect(thread.quit)
@@ -799,43 +825,43 @@ class CalibrationWindow(QMainWindow):
 
     @Slot(object)
     def _solver_progressed(self, progress: object) -> None:
-        """Queue one sampled candidate for paced playback on the GUI thread."""
+        """Update counters without visualizing an unsuccessful candidate."""
         if not isinstance(progress, SolverProgress) or self._level != self._solving_level:
             return
-        self._solver_previews.append(progress)
-        if not self._solver_preview_timer.isActive():
-            self._solver_preview_timer.start()
+        self._solver_status.setText(
+            f"Checked combination {progress.placements_considered} · "
+            f"{len(self._solver_solutions)} solution(s) found"
+        )
 
-    @Slot()
-    def _advance_solver_preview(self) -> None:
-        """Render at most one candidate per event-loop turn."""
-        if self._solver_previews:
-            progress = self._solver_previews.popleft()
-            self._show_solver_progress(progress)
+    @Slot(object)
+    def _solver_solution_found(self, solution: object) -> None:
+        """Append and immediately display one verified solution."""
+        if not isinstance(solution, SolverSolution) or self._level != self._solving_level:
             return
-
-        if self._pending_solver_result is not None:
-            result = self._pending_solver_result
-            self._pending_solver_result = None
-            self._adopt_solver_result(result)
-            return
-
-        if self._solver_thread is None:
-            self._finish_solver_activity()
+        self._solver_solutions.append(solution)
+        self._solution_index = len(self._solver_solutions) - 1
+        self._show_selected_solution()
+        self._log_activity(
+            f"Found solution {len(self._solver_solutions)} at combination "
+            f"{solution.placements_considered} with {len(solution.placement.rails)} rail(s)."
+        )
 
     def _adopt_solver_result(self, result: SolverResult) -> None:
-        """Retain and render a result after its sampled candidates were shown."""
+        """Retain and summarize a completed or stopped exhaustive search."""
         self._solver_result = result
-        self._save_solution_button.setEnabled(result.solved)
-        if result.placement is not None:
-            self._placement_editor.setPlainText(result.placement.model_dump_json(indent=2))
-            self._set_validated_placement(result.placement, None)
+        if result.solutions:
+            self._solver_solutions = list(result.solutions)
+            if self._solution_index < 0:
+                self._solution_index = 0
+            else:
+                self._solution_index = min(self._solution_index, len(self._solver_solutions) - 1)
+            self._show_selected_solution()
+        self._save_solution_button.setEnabled(bool(self._solver_solutions))
         self._render_solver_result(result)
         self._finish_solver_activity()
 
     def _finish_solver_activity(self) -> None:
         """Finish playback and restore editing once the worker has also stopped."""
-        self._solver_preview_timer.stop()
         self._solving_level = None
         if self._solver_thread is not None:
             return
@@ -843,47 +869,27 @@ class CalibrationWindow(QMainWindow):
         self._update_extraction_controls()
         self._update_semantic_controls()
 
-    def _show_solver_progress(self, progress: SolverProgress) -> None:
-        """Show the current sampled search candidate and its outcome."""
-        self._show_placement(progress.placement, open_cells=progress.open_cells)
-        if progress.outcome is CandidateOutcome.BRANCH_PRUNED:
-            self._solver_status.setText(
-                f"Branch {progress.branches_pruned}: pruned · "
-                f"{len(progress.placement.rails)} assigned, "
-                f"{len(progress.open_cells)} open cell(s)"
-            )
-        else:
-            self._solver_status.setText(
-                f"Candidate {progress.placements_considered}: "
-                f"{progress.outcome.value} · {len(progress.placement.rails)} rail(s)"
-            )
-
     @Slot(object)
     def _solver_completed(self, result: object) -> None:
-        """Hold a completed result until the queued candidate playback ends."""
+        """Adopt the final exhaustive-search summary."""
         if not isinstance(result, SolverResult) or self._level != self._solving_level:
             return
-        self._pending_solver_result = result
-        if not self._solver_preview_timer.isActive():
-            self._solver_preview_timer.start()
+        self._adopt_solver_result(result)
 
     @Slot(str)
     def _solver_failed(self, message: str) -> None:
         """Report a worker failure without touching Qt from its thread."""
-        self._solver_previews.clear()
-        self._pending_solver_result = None
-        self._solver_preview_timer.stop()
         self._solving_level = None
         self._show_error(f"Could not solve semantic level: {message}")
+        self._finish_solver_activity()
 
     @Slot()
     def _solver_thread_finished(self) -> None:
-        """Release worker references and finish or continue preview playback."""
+        """Release worker references and restore editing controls."""
         self._solver_thread = None
         self._solver_worker = None
-        if self._solver_previews or self._pending_solver_result is not None:
-            if not self._solver_preview_timer.isActive():
-                self._solver_preview_timer.start()
+        self._solver_stop_pending = False
+        if self._solving_level is not None:
             return
         self._finish_solver_activity()
 
@@ -893,6 +899,58 @@ class CalibrationWindow(QMainWindow):
         self._cell_editor.setEnabled(not solving)
         self._canvas.setEnabled(not solving)
         self._open_action.setEnabled(not solving)
+        self._update_solution_controls()
+
+    def _stop_solver(self) -> None:
+        """Keep all discoveries and request cooperative search termination."""
+        if self._solver_worker is None:
+            return
+        self._solver_stop_pending = True
+        self._solver_worker.request_stop()
+        self._stop_solver_button.setEnabled(False)
+        self._solver_status.setText(
+            f"Stopping… {len(self._solver_solutions)} solution(s) retained."
+        )
+
+    def _show_previous_solution(self) -> None:
+        if self._solution_index > 0:
+            self._solution_index -= 1
+            self._show_selected_solution()
+
+    def _show_next_solution(self) -> None:
+        if self._solution_index + 1 < len(self._solver_solutions):
+            self._solution_index += 1
+            self._show_selected_solution()
+
+    def _show_selected_solution(self) -> None:
+        """Render the solution selected by the workspace arrows."""
+        if not (0 <= self._solution_index < len(self._solver_solutions)):
+            self._update_solution_controls()
+            return
+        solution = self._solver_solutions[self._solution_index]
+        self._show_placement(solution.placement)
+        self._placement_editor.setPlainText(solution.placement.model_dump_json(indent=2))
+        self._set_validated_placement(solution.placement, None)
+        self._save_solution_button.setEnabled(True)
+        self._solver_status.setText(
+            f"Solution {self._solution_index + 1} of {len(self._solver_solutions)} · "
+            f"combination {solution.placements_considered} · "
+            f"{len(solution.placement.rails)} rail(s)"
+        )
+        self._update_solution_controls()
+
+    def _update_solution_controls(self) -> None:
+        """Refresh solution navigation and the cooperative stop action."""
+        count = len(self._solver_solutions)
+        position = self._solution_index + 1 if self._solution_index >= 0 else 0
+        self._solution_position.setText(
+            f"Solution {position} / {count}" if count else "No solutions yet"
+        )
+        self._previous_solution_button.setEnabled(position > 1)
+        self._next_solution_button.setEnabled(0 < position < count)
+        self._stop_solver_button.setEnabled(
+            self._solver_worker is not None and not self._solver_stop_pending
+        )
 
     def _render_solver_result(self, result: SolverResult) -> None:
         """Render placement and trace from immutable simulator-verified output."""
@@ -907,27 +965,23 @@ class CalibrationWindow(QMainWindow):
             f"{stats.transposition_hits} runtime cache hit(s)",
             f"Replay: {stats.runtime_states_visited} state(s), {stats.events_emitted} event(s)",
         ]
-        if result.solved and result.placement is not None:
+        if result.status is SolverStatus.STOPPED:
             self._solver_status.setText(
-                f"Found a verified solution with {len(result.placement.rails)} rail(s)."
+                f"Search stopped after {stats.placements_considered} combination(s); "
+                f"{len(result.solutions)} solution(s) retained."
             )
-            self._show_placement(result.placement)
-            lines.extend(("", "Placement:"))
-            lines.extend(
-                f"  ({rail.cell.row}, {rail.cell.col}) "
-                f"{rail.piece_kind.value} {rail.orientation.value}"
-                + ("" if rail.switch_output is None else f" output {rail.switch_output.value}")
-                for rail in result.placement.rails
+        elif result.solved:
+            self._solver_status.setText(
+                f"Search complete: {len(result.solutions)} verified solution(s)."
             )
         elif result.status is SolverStatus.LIMIT_REACHED:
             self._solver_status.setText("No solution found before the requested search limit.")
         else:
-            self._solver_status.setText("No valid placement exists within the level's inventory.")
+            self._solver_status.setText("No valid solution exists on this board.")
 
-        if result.trace:
-            lines.extend(("", "Trace:"))
-            lines.extend(_event_summary(event) for event in result.trace)
+        lines.append(f"Solutions: {len(result.solutions)}")
         self._log_activity("\n".join(lines))
+        self._update_solution_controls()
 
     def _show_placement(
         self,
@@ -968,12 +1022,8 @@ class CalibrationWindow(QMainWindow):
             self._workspace_tabs.setCurrentIndex(self._cells_tab_index)
 
     def _save_solution(self) -> None:
-        """Save the current solution only after its replay reached success."""
-        if (
-            self._solver_result is None
-            or not self._solver_result.solved
-            or self._solver_result.placement is None
-        ):
+        """Save the verified solution currently selected in the workspace."""
+        if not (0 <= self._solution_index < len(self._solver_solutions)):
             self._show_error("Solve the level successfully before saving a placement.")
             return
         suggested = self._solution_output_path or (
@@ -994,11 +1044,12 @@ class CalibrationWindow(QMainWindow):
 
     def _save_solution_to_path(self, output_path: Path) -> None:
         """Persist the current verified solution to an explicit destination."""
-        if self._solver_result is None or self._solver_result.placement is None:
+        if not (0 <= self._solution_index < len(self._solver_solutions)):
             self._show_error("Solve the level successfully before saving a placement.")
             return
+        placement = self._solver_solutions[self._solution_index].placement
         try:
-            save_placement(self._solver_result.placement, output_path)
+            save_placement(placement, output_path)
         except OSError as error:
             self._show_error(f"Could not save verified placement: {error}")
             return
@@ -1298,7 +1349,7 @@ class CalibrationWindow(QMainWindow):
             elif self._solver_result is None:
                 next_step = "Solve the formalized level."
             elif self._solver_result.solved:
-                next_step = "Review the verified placement in the Solution workspace."
+                next_step = "Review the verified placements in the Solutions workspace."
             else:
                 next_step = "Review the search result in the activity log."
         elif len(self._points) < len(_POINT_LABELS):
@@ -1424,8 +1475,11 @@ class CalibrationWindow(QMainWindow):
         self._level_path = None
         self._rail_budget = None
         self._solver_result = None
+        self._solver_solutions.clear()
+        self._solution_index = -1
         self._placement_editor.clear()
         self._save_solution_button.setEnabled(False)
+        self._update_solution_controls()
         self._solver_status.setText("Formalize the reviewed cells before solving.")
         self._update_semantic_controls()
         self._update_instruction()
@@ -1561,7 +1615,10 @@ class CalibrationWindow(QMainWindow):
         self._placement = None
         self._placement_path = None
         self._solver_result = None
+        self._solver_solutions.clear()
+        self._solution_index = -1
         self._save_solution_button.setEnabled(False)
+        self._update_solution_controls()
         self._clear_level_view()
         self._placement_editor.clear()
         self._placement_inspection_output.clear()
