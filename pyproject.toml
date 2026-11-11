@@ -21,6 +21,7 @@ gui = [
 
 [project.scripts]
 railbound-grid = "railbound.cli:main"
+railbound-whiteboard = "railbound.whiteboard_gui:main"
 
 [tool.pytest.ini_options]
 addopts = "--strict-markers --strict-config"
